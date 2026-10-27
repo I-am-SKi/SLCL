@@ -1,0 +1,17 @@
+# Normalize line endings: keep LF in the repo, let Git convert per-OS on checkout.
+* text=auto
+
+# Batch files must keep CRLF to run correctly on Windows.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets — never touch line endings.
+*.png binary
+*.ico binary
+*.bmp binary
+*.jpg binary
+*.webp binary
+*.zip binary
+
+# Lockfile is generated; keep it out of diff review noise but still tracked.
+package-lock.json text eol=lf

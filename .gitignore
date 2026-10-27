@@ -1,0 +1,33 @@
+# ---- dependencies ----
+node_modules/
+
+# ---- build output ----
+out/
+dist/
+release/
+*.tsbuildinfo
+
+# ---- generated from tsconfig / tsc -b ----
+electron.vite.config.js
+electron.vite.config.d.ts
+
+# ---- logs ----
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# ---- local env / secrets ----
+.env
+.env.local
+.env.*.local
+
+# ---- editor / OS ----
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# ---- tooling scratch (not part of the project) ----
+.omo/
+.adoptium.cjs

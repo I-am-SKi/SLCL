@@ -1,0 +1,39 @@
+appId: com.slatt.slcl
+productName: SLCL
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - package.json
+  - "!**/.vscode/*"
+  - "!src/*"
+  - "!electron.vite.config.ts"
+  - "!tsconfig.json"
+  - "!tsconfig.node.json"
+  - "!tsconfig.web.json"
+asarUnpack:
+  - "**/*.node"
+extraResources:
+  - from: build/icon.png
+    to: icon.png
+win:
+  icon: build/icon.ico
+  target:
+    - nsis
+nsis:
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico
+  installerHeaderIcon: build/icon.ico
+  # Custom NSIS script: SLCL-branded welcome/finish pages, drive-root install
+  # directory normalisation, and the uninstaller's cache-deletion checkbox.
+  include: installer.nsh
+  oneClick: false
+  # The installer ships its own directory page (build/installer.nsh) because
+  # NSIS's built-in one rejects drive roots like D:\ out of hand. Ours appends
+  # an SLCL folder instead, so "install to D:\" just works.
+  allowToChangeInstallationDirectory: false
+  createDesktopShortcut: true
+  shortcutName: SLCL
+electronDownload:
+  mirror: https://npmmirror.com/mirrors/electron/
