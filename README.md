@@ -9,6 +9,20 @@ Modrinth 与 CurseForge 双源资源下载与整合包安装，以及启动失�
 
 ---
 
+## 下载
+
+到 [Releases](../../releases/latest) 页面下载 Windows 安装程序：
+
+| 文件 | 说明 |
+|---|---|
+| `SLCL Setup <version>.exe` | Windows 安装程序（x64） |
+| `SHA256SUMS.txt` | 文件校验值 |
+
+首次运行若遇到 SmartScreen「已保护你的电脑」提示，是因为未购买代码签名证书，
+点击「更多信息 → 仍要运行」即可。版本更新日志见 [`docs/releases/`](docs/releases/)。
+
+---
+
 ## 功能
 
 ### 账户
