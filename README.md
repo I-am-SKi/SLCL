@@ -1,5 +1,7 @@
 # SLCL · SLATT Client
 
+启动器官网：https://slatt.cn/slcl
+
 一个用 Electron + React + TypeScript 写的 **Minecraft Java 版启动器**，面向 Windows 桌面。
 
 支持离线 / 微软正版 / LittleSkin 登录，多版本管理与安装（原版 + Fabric / Forge / NeoForge），
