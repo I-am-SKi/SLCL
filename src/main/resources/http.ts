@@ -29,10 +29,10 @@
  * official host always stays in the candidate list as a fallback, so a mirror
  * outage degrades to "slower" rather than "broken".
  */
-import { mkdirSync, createWriteStream, rmSync } from 'fs';
+import { mkdirSync, rmSync } from 'fs';
 import { dirname } from 'path';
-import { pipeline } from 'stream/promises';
 import { userAgent } from '../ua';
+import { downloadWithStall } from '../download/stream';
 
 const MCIM_HOST = 'https://mod.mcimirror.top';
 
@@ -136,24 +136,40 @@ export function downloadCandidates(url: string): string[] {
  * Download a URL into `dest`, trying the mirror first and the official CDN
  * second. A partial file left by a failed attempt is removed before retrying so
  * the fallback never appends to a truncated download.
+ *
+ * Uses the stall-protected streamer from the version downloader: a connection
+ * that accepts then goes silent (common on the CDN) would otherwise hang the
+ * modpack install forever.
  */
-export async function downloadToFile(url: string, dest: string): Promise<void> {
+export interface DownloadToFileOptions {
+  /** Upstream cancel signal. */
+  signal?: AbortSignal;
+  /** Called after every received chunk with the bytes just written. */
+  onBytes?: (delta: number) => void;
+  /** Abort when no bytes arrive for this long. */
+  stallMs?: number;
+}
+
+export async function downloadToFile(
+  url: string,
+  dest: string,
+  opts: DownloadToFileOptions = {},
+): Promise<void> {
   mkdirSync(dirname(dest), { recursive: true });
   const failures: string[] = [];
 
   for (const candidate of downloadCandidates(url)) {
+    if (opts.signal?.aborted) throw new Error('已取消');
     try {
-      const res = await fetch(candidate, {
+      await downloadWithStall(candidate, dest, {
+        signal: opts.signal,
+        stallMs: opts.stallMs,
         headers: { 'User-Agent': userAgent() },
-        signal: AbortSignal.timeout(600000),
+        onBytes: opts.onBytes,
       });
-      if (!res.ok || !res.body) {
-        failures.push(`${hostOf(candidate)} HTTP ${res.status}`);
-        continue;
-      }
-      await pipeline(res.body as unknown as NodeJS.ReadableStream, createWriteStream(dest));
       return;
     } catch (e) {
+      if (opts.signal?.aborted) throw new Error('已取消');
       failures.push(`${hostOf(candidate)} ${e instanceof Error ? e.message : String(e)}`);
       rmSync(dest, { force: true });
     }

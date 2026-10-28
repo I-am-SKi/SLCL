@@ -19,6 +19,21 @@ export interface AccountProfile {
   accessToken?: string;
   /** LittleSkin Yggdrasil client token (used to refresh `accessToken`). */
   clientToken?: string;
+  /**
+   * The identifier used to sign in (email or character name).
+   *
+   * Switching characters requires a fresh, *unbound* token, which only the
+   * authenticate call can produce — so the identifier is kept to avoid asking for
+   * it again. Signing in with a character name produces an already-bound token,
+   * so only an email makes switching possible.
+   */
+  loginName?: string;
+  /**
+   * Every Minecraft character available to a LittleSkin account, captured at login.
+   * The Yggdrasil API only returns this list from the authenticate response, so it
+   * must be persisted to offer role switching later without re-entering a password.
+   */
+  profiles?: Array<{ id: string; name: string }>;
   /** ISO timestamp of last successful login (microsoft). */
   lastLoginAt?: string;
 }
@@ -85,6 +100,11 @@ export interface VersionInstallOptions {
    * Omit to install the newest stable version.
    */
   loaderVersion?: string;
+  /**
+   * Fabric only: also install Fabric API into the new version's mods folder.
+   * Nearly every Fabric mod needs it, so this defaults to enabled; pass false to skip.
+   */
+  installFabricApi?: boolean;
 }
 
 export interface RemoteMinecraftVersion {
@@ -185,6 +205,15 @@ export interface DownloadProgress {
   downloadedBytes: number;
   /** Human readable current task, e.g. "Downloading libraries". */
   task: string;
+  /** Number of files to download (0 when unknown). */
+  totalFiles?: number;
+  /** Files finished so far. */
+  completedFiles?: number;
+  /**
+   * Bytes/second measured by the main process over a short sliding window.
+   * Absent when the current stage has no measurable transfer (e.g. unpacking).
+   */
+  speedBytesPerSec?: number;
 }
 
 export interface LaunchConfig {
@@ -248,6 +277,91 @@ export interface CrashDiagnosis {
   modCount: number | null;
   exitCode: number | null;
   versionId: string;
+}
+
+/** A Minecraft character a LittleSkin account can sign in as. */
+export interface LittleSkinRole {
+  id: string;
+  name: string;
+  /** True for the character the account is currently bound to. */
+  selected: boolean;
+}
+
+/** Result of a LittleSkin role detection. */
+export interface LittleSkinRoles {
+  roles: LittleSkinRole[];
+  /**
+   * True when only the current character could be determined. The Yggdrasil API
+   * only returns the full list from the login response, so accounts signed in
+   * before the launcher stored it must sign in once more to see every role.
+   */
+  needsRelogin: boolean;
+}
+
+// ---- SLATT team account (slatt.cn SSO) ----
+//
+// This integration is for SLATT team members only: accounts on slatt.cn can only
+// be registered by team members, so a successful SSO login always means "member".
+// `groupId` still distinguishes member / admin / owner for display purposes.
+
+/** Role on the team site, derived from the account's `group_id`. */
+export type SlattRole = 'member' | 'captain' | 'admin' | 'owner' | 'unknown';
+
+/** A skin published to the team's public library (`GET /api/skins`). */
+export interface SlattSkin {
+  id: number;
+  name: string;
+  /** Absolute URL of the actual 64x64 Minecraft skin PNG. */
+  skinUrl: string;
+  /** Absolute URL of the preview image. */
+  previewUrl: string;
+  /** Display name of the member who uploaded it. */
+  uploaderName: string;
+  /** Arm width: slim (Alex) or classic (Steve). */
+  model: 'classic' | 'slim';
+  /** Upload timestamp as returned by the site (`YYYY-MM-DD HH:mm:ss`). */
+  createdAt: string;
+}
+
+/** The signed-in SLATT team member. */
+export interface SlattUser {
+  uid: string;
+  /** Name shown on the website — surfaced in the home-page badge. */
+  username: string;
+  email: string;
+  /** Absolute avatar URL, or '' when the account has none. */
+  avatarUrl: string;
+  groupId: string;
+  role: SlattRole;
+  /** Human label for the badge, e.g. 团队成员 / 团队管理员 / 团队主管. */
+  roleLabel: string;
+  /** Whether the member has bound a skin of their own on the website. */
+  hasSkin: boolean;
+}
+
+/** A restored or freshly created login. */
+export interface SlattSession {
+  user: SlattUser;
+  /** Unix ms expiry of the launcher token, or null when unknown. */
+  expiresAt: number | null;
+}
+
+/** Outcome of applying a library skin to a Minecraft account. */
+export interface SlattApplyResult {
+  accountId: string;
+  accountName: string;
+  skinName: string;
+  /**
+   * True when the skin reached Mojang and is now the account's real skin.
+   * False for offline accounts (there is no account to upload to) and for a
+   * Microsoft account whose upload failed and fell back to a local preview.
+   */
+  uploaded: boolean;
+  /**
+   * Set when a Microsoft upload failed but the skin was still applied locally,
+   * so the UI can explain why the change is only visible inside the launcher.
+   */
+  uploadError?: string;
 }
 
 // ---- resource downloads (Modrinth / CurseForge: mods, packs, shaders, datapacks, modpacks) ----

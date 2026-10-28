@@ -10,6 +10,7 @@ import type {
   JavaInstallation,
   JavaRequirement,
   LocalMinecraftVersion,
+  LittleSkinRoles,
   LoginProgress,
   ModpackInstallResult,
   RemoteMinecraftVersion,
@@ -19,6 +20,9 @@ import type {
   ResourceVersion,
   ScreenshotInfo,
   SkinLookupResult,
+  SlattApplyResult,
+  SlattSession,
+  SlattSkin,
   VersionContents,
   VersionPaths,
 } from '../shared/types';
@@ -42,8 +46,10 @@ const api: SlclApi = {
     loginOffline: (username) => ipcRenderer.invoke(IPC.accountLoginOffline, username) as Promise<AccountProfile>,
     loginMicrosoft: () => ipcRenderer.invoke(IPC.accountLoginMicrosoft) as Promise<AccountProfile>,
     cancelMicrosoft: () => ipcRenderer.invoke(IPC.accountLoginMicrosoftCancel) as Promise<void>,
-    loginLittleSkin: (username, password) =>
-      ipcRenderer.invoke(IPC.accountLoginLittleSkin, username, password) as Promise<AccountProfile>,
+    rememberedLogins: () =>
+      ipcRenderer.invoke(IPC.accountRememberedLogins) as Promise<Array<{ loginName: string; password: string }>>,
+    loginLittleSkin: (username, password, remember) =>
+      ipcRenderer.invoke(IPC.accountLoginLittleSkin, username, password, remember) as Promise<AccountProfile>,
     remove: (id) => ipcRenderer.invoke(IPC.accountRemove, id) as Promise<void>,
     select: (id) => ipcRenderer.invoke(IPC.accountSelect, id) as Promise<void>,
     uploadSkin: (accountId, variant, pngBase64) =>
@@ -53,6 +59,10 @@ const api: SlclApi = {
     refreshSkin: (accountId) => ipcRenderer.invoke(IPC.accountGetSkin, accountId, true) as Promise<string>,
     setLocalSkin: (accountId, pngBase64) => ipcRenderer.invoke(IPC.accountSetLocalSkin, accountId, pngBase64) as Promise<void>,
     lookupSkin: (username) => ipcRenderer.invoke(IPC.accountLookupSkin, username) as Promise<SkinLookupResult>,
+    littleSkinRoles: (accountId, password, loginName) =>
+      ipcRenderer.invoke(IPC.accountLittleSkinRoles, accountId, password, loginName) as Promise<LittleSkinRoles>,
+    switchRole: (accountId, roleId, password, loginName) =>
+      ipcRenderer.invoke(IPC.accountSwitchRole, accountId, roleId, password, loginName) as Promise<AccountProfile>,
     applySkinFromUsername: (accountId, username) =>
       ipcRenderer.invoke(IPC.accountApplySkin, accountId, username) as Promise<SkinLookupResult>,
     onLoginProgress: subscribe<LoginProgress>(IPC.eventLoginProgress),
@@ -104,6 +114,17 @@ const api: SlclApi = {
     openLog: () => ipcRenderer.invoke(IPC.crashOpenLog) as Promise<boolean>,
     exportReport: () => ipcRenderer.invoke(IPC.crashExport) as Promise<string | null>,
   },
+  slatt: {
+    login: (account, password) => ipcRenderer.invoke(IPC.slattLogin, account, password) as Promise<SlattSession>,
+    logout: () => ipcRenderer.invoke(IPC.slattLogout) as Promise<void>,
+    session: () => ipcRenderer.invoke(IPC.slattSession) as Promise<SlattSession | null>,
+    restore: () => ipcRenderer.invoke(IPC.slattRestore) as Promise<SlattSession | null>,
+    refresh: () => ipcRenderer.invoke(IPC.slattRefresh) as Promise<SlattSession>,
+    skins: (force) => ipcRenderer.invoke(IPC.slattSkins, force) as Promise<SlattSkin[]>,
+    applySkin: (accountId, skinId) =>
+      ipcRenderer.invoke(IPC.slattApplySkin, accountId, skinId) as Promise<SlattApplyResult>,
+    saveSkin: (skinId, dir) => ipcRenderer.invoke(IPC.slattSaveSkin, skinId, dir) as Promise<string>,
+  },
   resources: {
     search: (type, query, options) =>
       ipcRenderer.invoke(IPC.resourcesSearch, type, query, options) as Promise<ResourceProject[]>,
@@ -117,6 +138,8 @@ const api: SlclApi = {
       ipcRenderer.invoke(IPC.resourcesInstalled, type, target) as Promise<ResourceFileInfo[]>,
     remove: (type, filename, target) =>
       ipcRenderer.invoke(IPC.resourcesRemove, type, filename, target) as Promise<void>,
+    mcmod: (title) =>
+      ipcRenderer.invoke(IPC.resourcesMcmodLink, title) as Promise<{ url: string | null; search: string }>,
     targetDir: (type, target) =>
       ipcRenderer.invoke(IPC.resourcesTargetDir, type, target) as Promise<string>,
   },

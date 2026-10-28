@@ -19,6 +19,9 @@ export const IPC = {
   accountGetSkin: 'slcl:account:get-skin',
   accountSetLocalSkin: 'slcl:account:set-local-skin',
   accountLookupSkin: 'slcl:account:lookup-skin',
+  accountRememberedLogins: 'slcl:account:remembered-logins',
+  accountLittleSkinRoles: 'slcl:account:littleskin-roles',
+  accountSwitchRole: 'slcl:account:switch-role',
   accountApplySkin: 'slcl:account:apply-skin',
   accountLoginLittleSkin: 'slcl:account:login-littleskin',
   // events from main -> renderer
@@ -63,6 +66,15 @@ export const IPC = {
   // crash report dialog actions
   crashOpenLog: 'slcl:crash:open-log',
   crashExport: 'slcl:crash:export',
+  // SLATT team account (slatt.cn SSO) + team skin library
+  slattLogin: 'slcl:slatt:login',
+  slattLogout: 'slcl:slatt:logout',
+  slattSession: 'slcl:slatt:session',
+  slattRestore: 'slcl:slatt:restore',
+  slattRefresh: 'slcl:slatt:refresh',
+  slattSkins: 'slcl:slatt:skins',
+  slattApplySkin: 'slcl:slatt:apply-skin',
+  slattSaveSkin: 'slcl:slatt:save-skin',
   // resources (Modrinth content: mods / resource packs / shaders / datapacks / modpacks)
   resourcesSearch: 'slcl:resources:search',
   resourcesVersions: 'slcl:resources:versions',
@@ -71,6 +83,7 @@ export const IPC = {
   resourcesInstalled: 'slcl:resources:installed',
   resourcesRemove: 'slcl:resources:remove',
   resourcesTargetDir: 'slcl:resources:target-dir',
+  resourcesMcmodLink: 'slcl:resources:mcmod-link',
   // misc
   openExternal: 'slcl:open-external',
   selectDirectory: 'slcl:select-directory',

@@ -16,6 +16,7 @@ import type {
   ResourceVersion,
 } from '@shared/types';
 import { getVersionGameDir, installVersion, listLocalVersions } from '../versions';
+import { createThrottle, runPool } from '../download/pool';
 import {
   installCurseforge,
   installCurseforgeModpack,
@@ -23,6 +24,7 @@ import {
   searchCurseforge,
 } from './curseforge';
 import { downloadToFile, fetchJson, modrinthCandidates } from './http';
+import { resolveMcmodLink } from './mcmod';
 
 /** Modrinth `project_type` value for each resource category. */
 const PROJECT_TYPE: Record<ResourceType, string> = {
@@ -329,6 +331,22 @@ function detectLoader(deps: Record<string, string>): 'fabric' | 'forge' | 'neofo
 }
 
 /**
+ * Overall progress budget for a modpack install. Each stage reserves a slice so
+ * the bar never jumps backwards when the inner version installer reports its own
+ * 0..1 progress.
+ */
+const PACK_SLICE = { from: 0.01, to: 0.05 } as const;
+const CORE_SLICE = { from: 0.05, to: 0.5 } as const;
+const OVERRIDE_SLICE = { from: 0.5, to: 0.55 } as const;
+const FILES_SLICE = { from: 0.55, to: 1 } as const;
+
+/** Map a child stage's 0..1 progress into an overall slice. */
+function mapProgress(slice: { from: number; to: number }, progress: number): number {
+  const clamped = Math.max(0, Math.min(1, progress));
+  return slice.from + clamped * (slice.to - slice.from);
+}
+
+/**
  * Install a Modrinth modpack (.mrpack):
  * 1. create the matching Minecraft version (plus its mod loader),
  * 2. download every file listed in `modrinth.index.json`,
@@ -339,6 +357,7 @@ export async function installModrinthModpack(
   versionId: string,
   name: string | undefined,
   onProgress: (p: DownloadProgress) => void,
+  signal: AbortSignal,
 ): Promise<ModpackInstallResult> {
   const version = await modrinthGet<ModrinthVersion>(`/version/${encodeURIComponent(versionId)}`);
   if (version.project_id !== projectId) throw new Error('版本与项目不匹配');
@@ -348,11 +367,38 @@ export async function installModrinthModpack(
 
   const tmpFile = join(tmpdir(), `slcl-pack-${randomUUID()}.mrpack`);
   try {
-    onProgress({ progress: 0, totalBytes: 0, downloadedBytes: 0, task: '下载整合包…' });
-    await downloadToFile(packFile.url, tmpFile);
+    // ---- the .mrpack itself, streamed so the bar moves during the download ----
+    const packSize = packFile.size ?? 0;
+    let packDone = 0;
+    const emitPack = createThrottle(() => {
+      onProgress({
+        progress:
+          packSize > 0
+            ? mapProgress(PACK_SLICE, packDone / packSize)
+            : PACK_SLICE.from,
+        totalBytes: packSize,
+        downloadedBytes: packDone,
+        task: '下载整合包…',
+        totalFiles: 1,
+        completedFiles: 0,
+      });
+    });
+    try {
+      onProgress({ progress: 0, totalBytes: packSize, downloadedBytes: 0, task: '下载整合包…', totalFiles: 1, completedFiles: 0 });
+      await downloadToFile(packFile.url, tmpFile, {
+        signal,
+        onBytes: (delta) => {
+          packDone += delta;
+          emitPack.emit();
+        },
+      });
+    } finally {
+      emitPack.stop();
+    }
 
     // ---- pass 1: read the manifest ----
-    onProgress({ progress: 0.05, totalBytes: 0, downloadedBytes: 0, task: '解析整合包清单…' });
+    onProgress({ progress: PACK_SLICE.to, totalBytes: 0, downloadedBytes: 0, task: '解析整合包清单…' });
+
     let indexRaw = '';
     let zip = await openZip(tmpFile, { lazyEntries: true, autoClose: false });
     try {
@@ -374,11 +420,22 @@ export async function installModrinthModpack(
     const loader = detectLoader(deps);
 
     const packName = uniqueVersionName(sanitizeVersionName(name?.trim() || version.name || 'Modpack'));
-    const newId = await installVersion(mcVersion, { loader, name: packName }, onProgress);
+    // The version installer reports its own 0..1 progress; fold it into the slice so
+    // the overall bar keeps climbing instead of dropping back to a stage constant.
+    const newId = await installVersion(mcVersion, { loader, name: packName }, (p) => {
+      onProgress({
+        progress: mapProgress(CORE_SLICE, p.progress),
+        totalBytes: p.totalBytes,
+        downloadedBytes: p.downloadedBytes,
+        task: p.task,
+        totalFiles: p.totalFiles,
+        completedFiles: p.completedFiles,
+      });
+    });
     const gameDir = getVersionGameDir(newId);
 
     // ---- pass 2: unpack overrides ----
-    onProgress({ progress: 0.55, totalBytes: 0, downloadedBytes: 0, task: '解压整合包配置…' });
+    onProgress({ progress: OVERRIDE_SLICE.from, totalBytes: 0, downloadedBytes: 0, task: '解压整合包配置…' });
     zip = await openZip(tmpFile, { lazyEntries: true, autoClose: false });
     try {
       for await (const entry of walkEntriesGenerator(zip)) {
@@ -399,34 +456,85 @@ export async function installModrinthModpack(
       zip.close();
     }
 
-    // ---- download the listed files ----
+    // ---- download the listed files (parallel, byte-accurate, cancellable) ----
     const files = (index.files ?? []).filter((f) => f.env?.client !== 'unsupported');
     const total = files.length;
+    const totalBytes = files.reduce((sum, f) => sum + (f.fileSize ?? 0), 0);
     let done = 0;
     let doneBytes = 0;
-    let totalBytes = 0;
-    for (const f of files) totalBytes += f.fileSize ?? 0;
+    // Bytes of the files currently in flight, so the bar moves during a single big mod.
+    const inFlight = new Map<number, number>();
+    const sumInFlight = (): number => {
+      let sum = 0;
+      for (const v of inFlight.values()) sum += v;
+      return sum;
+    };
 
-    for (const f of files) {
-      const url = f.downloads?.[0];
-      if (!url) {
-        done += 1;
-        doneBytes += f.fileSize ?? 0;
-        continue;
-      }
-      const dest = safeJoin(gameDir, f.path);
+    const emitFiles = createThrottle(() => {
+      const bytes = doneBytes + sumInFlight();
+      const ratio = totalBytes > 0 ? Math.min(1, bytes / totalBytes) : done / Math.max(total, 1);
       onProgress({
-        progress: 0.55 + (done / Math.max(total, 1)) * 0.44,
+        progress: mapProgress(FILES_SLICE, ratio),
         totalBytes,
-        downloadedBytes: doneBytes,
-        task: `下载整合包文件 (${done + 1}/${total})`,
+        downloadedBytes: bytes,
+        task: `下载整合包文件 (${Math.min(done + 1, total)}/${total})`,
+        totalFiles: total,
+        completedFiles: done,
       });
-      await downloadToFile(url, dest);
-      done += 1;
-      doneBytes += f.fileSize ?? 0;
+    });
+
+    try {
+      onProgress({
+        progress: FILES_SLICE.from,
+        totalBytes,
+        downloadedBytes: 0,
+        task: `下载整合包文件 (0/${total})`,
+        totalFiles: total,
+        completedFiles: 0,
+      });
+      await runPool(
+        files,
+        async (f, i) => {
+          const url = f.downloads?.[0];
+          const dest = safeJoin(gameDir, f.path);
+          if (!url) {
+            done += 1;
+            doneBytes += f.fileSize ?? 0;
+            emitFiles.emit();
+            return;
+          }
+          let got = 0;
+          inFlight.set(i, 0);
+          try {
+            await downloadToFile(url, dest, {
+              signal,
+              onBytes: (delta) => {
+                got += delta;
+                inFlight.set(i, got);
+                emitFiles.emit();
+              },
+            });
+          } finally {
+            inFlight.delete(i);
+          }
+          done += 1;
+          doneBytes += got > 0 ? got : (f.fileSize ?? 0);
+          emitFiles.emit();
+        },
+        { signal, concurrency: 8 },
+      );
+    } finally {
+      emitFiles.stop();
     }
 
-    onProgress({ progress: 1, totalBytes, downloadedBytes: totalBytes, task: '整合包安装完成' });
+    onProgress({
+      progress: 1,
+      totalBytes,
+      downloadedBytes: totalBytes,
+      task: '整合包安装完成',
+      totalFiles: total,
+      completedFiles: total,
+    });
     return { versionId: newId, files: done };
   } finally {
     if (existsSync(tmpFile)) rmSync(tmpFile, { force: true });
@@ -470,6 +578,20 @@ export async function installResource(
 }
 
 /** Install a modpack (Modrinth .mrpack or CurseForge .zip with manifest.json). */
+/**
+ * Abort controller for a modpack install.
+ *
+ * The version installer owns its own controller, but it clears it once the version
+ * is created — the mod file downloads that follow would then be uncancellable and
+ * the UI's "cancel" button would appear dead. This controller covers the whole
+ * modpack session, and the IPC cancel handler aborts both.
+ */
+let modpackAbort: AbortController | null = null;
+
+export function cancelModpackInstall(): void {
+  modpackAbort?.abort();
+}
+
 export async function installModpack(
   projectId: string,
   versionId: string,
@@ -477,8 +599,27 @@ export async function installModpack(
   onProgress: (p: DownloadProgress) => void,
   source: ResourceSource = 'modrinth',
 ): Promise<ModpackInstallResult> {
-  if (source === 'curseforge') {
-    return installCurseforgeModpack(projectId, versionId, name, onProgress);
+  if (modpackAbort) throw new Error('已有整合包安装任务在进行中,请稍候');
+  const controller = new AbortController();
+  modpackAbort = controller;
+  try {
+    if (source === 'curseforge') {
+      return await installCurseforgeModpack(projectId, versionId, name, onProgress, controller.signal);
+    }
+    return await installModrinthModpack(projectId, versionId, name, onProgress, controller.signal);
+  } catch (e) {
+    if (controller.signal.aborted) throw new Error('已取消');
+    throw e;
+  } finally {
+    modpackAbort = null;
   }
-  return installModrinthModpack(projectId, versionId, name, onProgress);
+}
+
+/**
+ * MC百科 entry for a project, used by the resource cards' quick links.
+ * Returns a direct entry URL when a confident title match exists, plus a search URL
+ * that always works.
+ */
+export async function mcmodLink(title: string): Promise<{ url: string | null; search: string }> {
+  return resolveMcmodLink(title);
 }

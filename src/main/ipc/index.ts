@@ -27,6 +27,7 @@ import {
 } from '../launch/crash';
 import * as javaDetector from '../java/detector';
 import * as resources from '../resources';
+import * as slatt from '../slatt';
 import * as javaInstaller from '../java/installer';
 import { getSettings, updateSettings } from '../settings/store';
 
@@ -48,8 +49,8 @@ export function registerIpc(): void {
     auth.loginMicrosoft((p: LoginProgress) => broadcast(IPC.eventLoginProgress, p)),
   );
   ipcMain.handle(IPC.accountLoginMicrosoftCancel, () => auth.cancelMicrosoftLogin());
-  ipcMain.handle(IPC.accountLoginLittleSkin, (_e, username: string, password: string) =>
-    auth.loginLittleSkin(username, password),
+  ipcMain.handle(IPC.accountLoginLittleSkin, (_e, username: string, password: string, remember?: boolean) =>
+    auth.loginLittleSkin(username, password, remember !== false),
   );
   ipcMain.handle(IPC.accountRemove, (_e, id: string) => auth.removeAccount(id));
   ipcMain.handle(IPC.accountSelect, (_e, id: string | null) => auth.selectAccount(id));
@@ -61,6 +62,15 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.accountSetLocalSkin, (_e, accountId: string, pngBase64: string) => auth.setLocalSkin(accountId, pngBase64));
   ipcMain.handle(IPC.accountLookupSkin, (_e, username: string) => auth.lookupSkinByUsername(username));
   ipcMain.handle(IPC.accountApplySkin, (_e, accountId: string, username: string) => auth.applySkinFromUsername(accountId, username));
+  ipcMain.handle(IPC.accountRememberedLogins, () => auth.listRememberedLogins());
+  ipcMain.handle(IPC.accountLittleSkinRoles, (_e, accountId: string, password?: string, loginName?: string) =>
+    auth.listLittleSkinRoles(accountId, password, loginName),
+  );
+  ipcMain.handle(
+    IPC.accountSwitchRole,
+    (_e, accountId: string, roleId: string, password: string, loginName?: string) =>
+      auth.switchLittleSkinRole(accountId, roleId, password, loginName),
+  );
 
   // ---- versions ----
   ipcMain.handle(IPC.versionsRemote, () => versions.listRemoteVersions());
@@ -76,7 +86,13 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.versionsRepair, (_e, id: string) =>
     versions.repairVersion(id, (p) => broadcast(IPC.eventDownloadProgress, p)),
   );
-  ipcMain.handle(IPC.versionsCancel, () => versions.cancelDownload());
+  ipcMain.handle(IPC.versionsCancel, () => {
+    // A modpack install spans two owners: the version installer (while the base
+    // version is being created) and the resource module (while the pack's own files
+    // download). Abort both so "cancel" is never a no-op.
+    versions.cancelDownload();
+    resources.cancelModpackInstall();
+  });
   ipcMain.handle(IPC.versionsRename, (_e, id: string, newName: string) => versions.renameVersion(id, newName));
   ipcMain.handle(IPC.versionsPaths, (_e, id: string) => versions.getVersionPaths(id));
   ipcMain.handle(IPC.versionsOpenFolder, (_e, id: string, kind: VersionFolderKind) => versions.openVersionFolder(id, kind));
@@ -175,6 +191,20 @@ export function registerIpc(): void {
     return res.filePath;
   });
 
+  // ---- SLATT team account (slatt.cn SSO) + team skin library ----
+  ipcMain.handle(IPC.slattLogin, (_e, account: string, password: string) => slatt.login(account, password));
+  ipcMain.handle(IPC.slattLogout, () => slatt.logout());
+  ipcMain.handle(IPC.slattSession, () => slatt.currentSession());
+  ipcMain.handle(IPC.slattRestore, () => slatt.restoreSession());
+  ipcMain.handle(IPC.slattRefresh, () => slatt.refreshProfile());
+  ipcMain.handle(IPC.slattSkins, (_e, force?: boolean) => slatt.listSkins(force));
+  ipcMain.handle(IPC.slattApplySkin, (_e, accountId: string, skinId: number) =>
+    slatt.applySkin(accountId, skinId),
+  );
+  ipcMain.handle(IPC.slattSaveSkin, (_e, skinId: number, dir: string) =>
+    slatt.saveSkinToFolder(skinId, dir),
+  );
+
   // ---- resource downloads (mods / resource packs / shaders / datapacks / modpacks) ----
   ipcMain.handle(IPC.resourcesSearch, (_e, type: ResourceType, query: string, options?: ResourceSearchOptions) =>
     resources.searchResources(type, query, options),
@@ -213,6 +243,7 @@ export function registerIpc(): void {
   ipcMain.handle(IPC.resourcesTargetDir, (_e, type: ResourceType, target: ResourceInstallTarget) =>
     resources.getTargetDir(type, target),
   );
+  ipcMain.handle(IPC.resourcesMcmodLink, (_e, title: string) => resources.mcmodLink(title));
 
   // ---- misc ----
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));

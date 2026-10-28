@@ -15,6 +15,7 @@ import type {
 } from '@shared/types';
 import { getSettings } from '../settings/store';
 import { getVersionGameDir, installVersion, listLocalVersions } from '../versions';
+import { createThrottle, runPool } from '../download/pool';
 import { curseforgeCandidates, downloadToFile, fetchJson } from './http';
 
 /**
@@ -301,6 +302,7 @@ export async function installCurseforgeModpack(
   fileId: string,
   name: string | undefined,
   onProgress: (p: DownloadProgress) => void,
+  signal: AbortSignal,
 ): Promise<ModpackInstallResult> {
   const files = await listCurseforgeVersions('modpack', projectId);
   const pack = files.find((f) => f.id === fileId);
@@ -309,8 +311,31 @@ export async function installCurseforgeModpack(
 
   const tmpFile = join(tmpdir(), `slcl-cfpack-${randomUUID()}.zip`);
   try {
-    onProgress({ progress: 0, totalBytes: 0, downloadedBytes: 0, task: '下载整合包…' });
-    await downloadToFile(packUrl, tmpFile);
+    // ---- the archive itself, streamed so the bar moves during the download ----
+    const packSize = pack.fileSize ?? 0;
+    let packDone = 0;
+    const emitPack = createThrottle(() => {
+      onProgress({
+        progress: packSize > 0 ? 0.01 + Math.min(1, packDone / packSize) * 0.04 : 0.01,
+        totalBytes: packSize,
+        downloadedBytes: packDone,
+        task: '下载整合包…',
+        totalFiles: 1,
+        completedFiles: 0,
+      });
+    });
+    try {
+      onProgress({ progress: 0, totalBytes: packSize, downloadedBytes: 0, task: '下载整合包…', totalFiles: 1, completedFiles: 0 });
+      await downloadToFile(packUrl, tmpFile, {
+        signal,
+        onBytes: (delta) => {
+          packDone += delta;
+          emitPack.emit();
+        },
+      });
+    } finally {
+      emitPack.stop();
+    }
 
     // ---- read manifest ----
     onProgress({ progress: 0.05, totalBytes: 0, downloadedBytes: 0, task: '解析整合包清单…' });
@@ -334,7 +359,18 @@ export async function installCurseforgeModpack(
     const loader = loaderFromManifest(manifest);
 
     const packName = uniqueVersionName(sanitizeVersionName(name?.trim() || pack.name || 'Modpack'));
-    const newId = await installVersion(mcVersion, { loader, name: packName }, onProgress);
+    // Fold the nested version install into 0.05..0.5 so the overall bar never
+    // jumps back to a stage constant once the version is ready.
+    const newId = await installVersion(mcVersion, { loader, name: packName }, (p) => {
+      onProgress({
+        progress: 0.05 + Math.max(0, Math.min(1, p.progress)) * 0.45,
+        totalBytes: p.totalBytes,
+        downloadedBytes: p.downloadedBytes,
+        task: p.task,
+        totalFiles: p.totalFiles,
+        completedFiles: p.completedFiles,
+      });
+    });
     const gameDir = getVersionGameDir(newId);
 
     // ---- unpack overrides (folder name is configurable in the manifest) ----
@@ -355,40 +391,79 @@ export async function installCurseforgeModpack(
       zip.close();
     }
 
-    // ---- download the listed project files ----
+    // ---- download the listed project files (parallel, cancellable) ----
     const wanted = (manifest.files ?? []).filter((f) => f.projectID && f.fileID);
     const total = wanted.length;
     let done = 0;
-    for (const item of wanted) {
-      const modId = String(item.projectID);
-      const fid = String(item.fileID);
+    let doneBytes = 0;
+
+    const emitFiles = createThrottle(() => {
       onProgress({
-        progress: 0.5 + (done / Math.max(total, 1)) * 0.49,
+        progress: 0.55 + Math.min(0.99, (done / Math.max(total, 1)) * 0.44),
+        totalBytes: 0,
+        downloadedBytes: doneBytes,
+        task: `下载整合包文件 (${Math.min(done + 1, total)}/${total})`,
+        totalFiles: total,
+        completedFiles: done,
+      });
+    });
+
+    try {
+      onProgress({
+        progress: 0.55,
         totalBytes: 0,
         downloadedBytes: 0,
-        task: `下载整合包文件 (${done + 1}/${total})`,
+        task: `下载整合包文件 (0/${total})`,
+        totalFiles: total,
+        completedFiles: 0,
       });
-      try {
-        // The manifest does not include the target path, so resolve it from the
-        // file metadata: mods go to mods/, everything else by its own top folder.
-        const info = await cfGet<{ data?: CfFile }>(`/mods/${modId}/files/${fid}`);
-        const file = info.data;
-        if (!file) {
-          done += 1;
-          continue;
-        }
-        const url = await resolveFileUrl(modId, fid, file.downloadUrl ?? undefined);
-        const filename = basename(file.fileName ?? `cf-${fid}.jar`);
-        const sub = FOLDER_BY_TYPE.mod;
-        const dest = join(gameDir, sub, filename);
-        await downloadToFile(url, dest);
-      } catch {
-        /* a single unavailable file must not abort the whole pack */
-      }
-      done += 1;
+      await runPool(
+        wanted,
+        async (item) => {
+          const modId = String(item.projectID);
+          const fid = String(item.fileID);
+          try {
+            // The manifest does not include the target path, so resolve it from the
+            // file metadata: mods go to mods/, everything else by its own top folder.
+            const info = await cfGet<{ data?: CfFile }>(`/mods/${modId}/files/${fid}`);
+            const file = info.data;
+            if (!file) return;
+            const url = await resolveFileUrl(modId, fid, file.downloadUrl ?? undefined);
+            const filename = basename(file.fileName ?? `cf-${fid}.jar`);
+            const sub = FOLDER_BY_TYPE.mod;
+            const dest = join(gameDir, sub, filename);
+            let got = 0;
+            await downloadToFile(url, dest, {
+              signal,
+              onBytes: (delta) => {
+                got += delta;
+                emitFiles.emit();
+              },
+            });
+            doneBytes += got > 0 ? got : (file.fileLength ?? 0);
+          } catch (e) {
+            // A cancelled task must stop the pool; a single unavailable file must not
+            // abort the whole pack.
+            if (signal.aborted) throw e;
+          } finally {
+            done += 1;
+            emitFiles.emit();
+          }
+        },
+        { signal, concurrency: 6 },
+      );
+    } finally {
+      emitFiles.stop();
     }
 
-    onProgress({ progress: 1, totalBytes: 0, downloadedBytes: 0, task: '整合包安装完成' });
+    onProgress({
+      progress: 1,
+      totalBytes: 0,
+      downloadedBytes: doneBytes,
+      task: '整合包安装完成',
+      totalFiles: total,
+      completedFiles: total,
+    });
     return { versionId: newId, files: done };
   } finally {
     if (existsSync(tmpFile)) rmSync(tmpFile, { force: true });

@@ -12,6 +12,7 @@ import type {
   JavaInstallation,
   JavaRequirement,
   LaunchConfig,
+  LittleSkinRoles,
   LocalMinecraftVersion,
   LoginProgress,
   ModLoader,
@@ -27,6 +28,9 @@ import type {
   ResourceVersion,
   ScreenshotInfo,
   SkinLookupResult,
+  SlattApplyResult,
+  SlattSession,
+  SlattSkin,
   VersionContents,
   VersionFolderKind,
   VersionInstallOptions,
@@ -43,8 +47,13 @@ export interface SlclApi {
     loginOffline(username: string): Promise<AccountProfile>;
     loginMicrosoft(): Promise<AccountProfile>;
     cancelMicrosoft(): Promise<void>;
-    /** Sign in with a LittleSkin account (email/username + password via Yggdrasil). */
-    loginLittleSkin(username: string, password: string): Promise<AccountProfile>;
+    /**
+     * Sign in to LittleSkin. remember stores the password (DPAPI-encrypted) so
+     * switching characters later does not have to ask for it again.
+     */
+    loginLittleSkin(username: string, password: string, remember?: boolean): Promise<AccountProfile>;
+    /** Remembered LittleSkin logins, used to prefill the sign-in form. */
+    rememberedLogins(): Promise<Array<{ loginName: string; password: string }>>;
     remove(id: string): Promise<void>;
     select(id: string | null): Promise<void>;
     /** Upload a skin (PNG, base64) for a Microsoft account. */
@@ -64,6 +73,25 @@ export interface SlclApi {
     lookupSkin(username: string): Promise<SkinLookupResult>;
     /** Apply a premium account's skin to a local account (saved to cache). */
     applySkinFromUsername(accountId: string, username: string): Promise<SkinLookupResult>;
+    /**
+     * LittleSkin only: the Minecraft characters this account can sign in as.
+     * Pass a password to read the authoritative list (needed for accounts that
+     * signed in before the launcher cached it).
+     */
+    littleSkinRoles(accountId: string, password?: string, loginName?: string): Promise<LittleSkinRoles>;
+    /**
+     * LittleSkin only: switch the account to another character.
+     *
+     * Yggdrasil can bind a character to a fresh token but never rebind an existing
+     * one, so a new unbound token is required — which means re-authenticating.
+     * `password` may be omitted: the remembered credential is used automatically.
+     */
+    switchRole(
+      accountId: string,
+      roleId: string,
+      password?: string,
+      loginName?: string,
+    ): Promise<AccountProfile>;
     /** Subscribe to Microsoft login progress. Returns an unsubscribe fn. */
     onLoginProgress(cb: (p: LoginProgress) => void): () => void;
   };
@@ -138,6 +166,28 @@ export interface SlclApi {
     /** Ask for a save location and write the error report. Returns the path, or null if cancelled. */
     exportReport(): Promise<string | null>;
   };
+  /**
+   * SLATT team site (slatt.cn) integration. Team-members-only: the site itself
+   * only allows team members to register.
+   */
+  slatt: {
+    /** Sign in with the site account. Throws with a human-readable message. */
+    login(account: string, password: string): Promise<SlattSession>;
+    /** Revoke the launcher session and forget the token locally. */
+    logout(): Promise<void>;
+    /** Cached session, without touching the network. */
+    session(): Promise<SlattSession | null>;
+    /** Validate the stored token against the site (used on startup). */
+    restore(): Promise<SlattSession | null>;
+    /** Re-read the member profile, e.g. after changing the skin on the site. */
+    refresh(): Promise<SlattSession>;
+    /** The whole team skin library. */
+    skins(force?: boolean): Promise<SlattSkin[]>;
+    /** Install a library skin onto a Minecraft account. */
+    applySkin(accountId: string, skinId: number): Promise<SlattApplyResult>;
+    /** Save a library skin as a PNG into an arbitrary folder. Returns the written path. */
+    saveSkin(skinId: number, dir: string): Promise<string>;
+  };
   resources: {
     /** Search Modrinth for projects of the given type. */
     search(
@@ -175,6 +225,8 @@ export interface SlclApi {
     remove(type: ResourceType, filename: string, target: ResourceInstallTarget): Promise<void>;
     /** Resolve (and create) the absolute install directory for a type + target combo. */
     targetDir(type: ResourceType, target: ResourceInstallTarget): Promise<string>;
+    /** MC百科 entry for a project title (direct URL when matched, plus a search URL). */
+    mcmod(title: string): Promise<{ url: string | null; search: string }>;
   };
   openExternal(url: string): Promise<void>;
   selectDirectory(): Promise<string | null>;

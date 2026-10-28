@@ -14,7 +14,7 @@ import type {
   VersionInstallOptions,
 } from '@shared/types';
 import { formatBytes, notify } from '../lib/toast';
-import { endDownload, startDownload, useActiveDownload } from '../lib/download';
+import { cancelDownload, endDownload, failDownload, startDownload, useIsDownloading } from '../lib/download';
 import { loaderLabel, tagLabel, versionTypeLabel } from '../lib/i18n';
 import { confirmAction } from '../components/ConfirmDialog';
 import Select from '../components/Select';
@@ -84,11 +84,15 @@ function formatDate(iso: string): string {
   return new Date(t).toLocaleDateString('zh-CN', { year: 'numeric', month: '2-digit', day: '2-digit' });
 }
 
-export default function Resources(): JSX.Element {
+export default function Resources({
+  onNavigate,
+}: {
+  onNavigate: (view: 'downloads') => void;
+}): JSX.Element {
   const [tabKey, setTabKey] = useState<TabKey>('gameversion');
   const isGameTab = tabKey === 'gameversion';
   const type: ResourceType = isGameTab ? 'mod' : tabKey;
-  const download = useActiveDownload();
+  const downloading = useIsDownloading();
   const [versions, setVersions] = useState<LocalMinecraftVersion[]>([]);
   const [versionId, setVersionId] = useState('');
   const [gameDirs, setGameDirs] = useState<GameDirInfo[]>([]);
@@ -412,8 +416,13 @@ export default function Resources(): JSX.Element {
       notify(`已安装 ${finalId}`, 'success');
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      if (msg === '已取消') notify('已取消下载', 'info');
-      else notify(msg, 'error');
+      if (msg.includes('取消')) {
+        cancelDownload();
+        notify('已取消下载', 'info');
+      } else {
+        failDownload(msg);
+        notify(msg, 'error');
+      }
     } finally {
       endDownload();
     }
@@ -451,19 +460,51 @@ export default function Resources(): JSX.Element {
     [type],
   );
 
+  /**
+   * Align the mod-version filters with the game version the user chose to install
+   * into. Without this, picking a target version left the list showing files for
+   * every Minecraft version, and the user had to set the same filters by hand.
+   */
+  async function syncFiltersToTarget(project: ResourceProject, targetVid: string): Promise<void> {
+    const v = versions.find((x) => x.id === targetVid);
+    if (!v) return;
+
+    const nextGame = v.minecraftVersion || dialogGameVersion;
+    // Only mods/resources expose a loader filter; vanilla versions have no loader.
+    const nextLoader =
+      tab.hasLoader && v.loader && LOADERS.includes(v.loader) ? v.loader : tab.hasLoader ? '' : '';
+
+    const gameChanged = nextGame !== dialogGameVersion;
+    const loaderChanged = nextLoader !== dialogLoader;
+    if (!gameChanged && !loaderChanged) return;
+
+    setDialogGameVersion(nextGame);
+    setDialogLoader(nextLoader);
+    await loadDialogVersions(project, nextGame, nextLoader);
+  }
+
   async function openDialog(p: ResourceProject): Promise<void> {
     setProject(p);
-    setDialogGameVersion(gameVersionFilter);
-    setDialogLoader(tab.hasLoader ? loaderFilter : '');
+    const initialTarget = versionId || versions[0]?.id || '';
+    // Page-level filters win; otherwise derive them from the version being installed
+    // into, so the list opens on compatible files instead of everything.
+    const targetVersion = versions.find((v) => v.id === initialTarget);
+    const initialGame = gameVersionFilter || targetVersion?.minecraftVersion || '';
+    const initialLoader = tab.hasLoader
+      ? loaderFilter ||
+        (targetVersion?.loader && LOADERS.includes(targetVersion.loader) ? targetVersion.loader : '')
+      : '';
+    setDialogGameVersion(initialGame);
+    setDialogLoader(initialLoader);
     setDialogVersions([]);
     setPackVersionId('');
     setTargetMode('auto');
-    setTargetVersionId(versionId || versions[0]?.id || '');
+    setTargetVersionId(initialTarget);
     setCustomDir('');
     setWorldFolder('');
     setPackName(p.title);
     setDialogTargetPath('');
-    await loadDialogVersions(p, gameVersionFilter, tab.hasLoader ? loaderFilter : '');
+    await loadDialogVersions(p, initialGame, initialLoader);
   }
 
   // Worlds are only needed for datapacks (install into a specific world).
@@ -576,7 +617,14 @@ export default function Resources(): JSX.Element {
       await loadLocalVersions();
       setVersionId(r.versionId);
     } catch (e) {
-      notify(e instanceof Error ? e.message : String(e), 'error');
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('取消')) {
+        cancelDownload();
+        notify('已取消下载', 'info');
+      } else {
+        failDownload(msg);
+        notify(msg, 'error');
+      }
     } finally {
       endDownload();
       setInstalling(false);
@@ -616,6 +664,23 @@ export default function Resources(): JSX.Element {
           ? `https://www.curseforge.com/minecraft/search?search=${encodeURIComponent(p.title)}`
           : `https://modrinth.com/mods?q=${encodeURIComponent(p.title)}`;
     void window.slcl.openExternal(url);
+  }
+
+  /**
+   * Open the project on MC百科.
+   *
+   * Resolution happens on click rather than while rendering: mcmod.cn rate-limits
+   * the search page, so pre-fetching a whole page of cards would return empty
+   * results for most of them. One request per click stays well inside the limit,
+   * and the main process caches both hits and misses.
+   */
+  async function openMcmod(title: string): Promise<void> {
+    try {
+      const link = await window.slcl.resources.mcmod(title);
+      await window.slcl.openExternal(link.url ?? link.search);
+    } catch {
+      await window.slcl.openExternal(`https://search.mcmod.cn/s?key=${encodeURIComponent(title)}`);
+    }
   }
 
   function ResourceCard({ p, rank }: { p: ResourceProject; rank?: number }): JSX.Element {
@@ -668,6 +733,14 @@ export default function Resources(): JSX.Element {
           >
             CurseForge
           </button>
+          <span className="muted small">·</span>
+          <button
+            className="link-btn"
+            onClick={() => void openMcmod(p.title)}
+            title="在 MC百科 查找该资源（有对应条目时直接打开）"
+          >
+            MC百科
+          </button>
         </div>
         <button className="btn btn-primary btn-block" onClick={() => void openDialog(p)} disabled={installing}>
           安装
@@ -678,10 +751,22 @@ export default function Resources(): JSX.Element {
 
   return (
     <div>
-      <h1 className="page-title">资源下载</h1>
-      <p className="page-subtitle">
-        下载 Minecraft 游戏版本、模组、资源包、光影包、数据包与整合包,可自由选择游戏版本与安装位置。
-      </p>
+      <div className="row-between" style={{ alignItems: 'flex-start' }}>
+        <div>
+          <h1 className="page-title">资源下载</h1>
+          <p className="page-subtitle">
+            下载 Minecraft 游戏版本、模组、资源包、光影包、数据包与整合包,可自由选择游戏版本与安装位置。
+          </p>
+        </div>
+        <button
+          className="btn"
+          onClick={() => onNavigate('downloads')}
+          title="查看下载进度、速度与文件数量"
+        >
+          下载管理
+          {downloading && <span className="dl-nav-dot" aria-label="有下载进行中" />}
+        </button>
+      </div>
 
       {/* ---- tabs ---- */}
       <div className="tabs">
@@ -711,7 +796,7 @@ export default function Resources(): JSX.Element {
               </span>
             </div>
             <p className="muted small" style={{ margin: '6px 0 12px' }}>
-              可在「版本管理」中切换当前文件夹。已安装的版本会标记出来,按大版本折叠,展开后可选具体小版本。
+              可在「版本管理」中切换当前文件夹。点「安装」可选择加载器(原版 / Fabric / Forge / NeoForge)与版本名。
             </p>
             <div className="row" style={{ flexWrap: 'wrap' }}>
               <input
@@ -748,32 +833,28 @@ export default function Resources(): JSX.Element {
               </div>
             ) : (
               <div className="version-list" style={{ marginTop: 14, maxHeight: 480 }}>
-                {remoteFiltered.map((v) => {
-                  const installed = versions.some((l) => l.id === v.id);
-                  return (
-                    <div key={v.id} className="version-row">
-                      <div className="version-row-main">
-                        <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
-                          <span className="content-row-name">{v.id}</span>
-                          {versionTypeBadge(v.type)}
-                          {installed && <span className="badge">已安装</span>}
-                        </div>
-                        <span className="muted small">
-                          {new Date(v.releaseTime).toLocaleDateString('zh-CN')}
-                        </span>
+                {remoteFiltered.map((v) => (
+                  <div key={v.id} className="version-row">
+                    <div className="version-row-main">
+                      <div className="row" style={{ gap: 8, flexWrap: 'wrap' }}>
+                        <span className="content-row-name">{v.id}</span>
+                        {versionTypeBadge(v.type)}
                       </div>
-                      <div className="version-row-side">
-                        <button
-                          className="btn btn-primary btn-sm"
-                          onClick={() => openVersionInstall(v)}
-                          disabled={download !== null}
-                        >
-                          安装
-                        </button>
-                      </div>
+                      <span className="muted small">
+                        {new Date(v.releaseTime).toLocaleDateString('zh-CN')}
+                      </span>
                     </div>
-                  );
-                })}
+                    <div className="version-row-side">
+                      <button
+                        className="btn btn-primary btn-sm"
+                        onClick={() => openVersionInstall(v)}
+                        disabled={downloading}
+                      >
+                        安装
+                      </button>
+                    </div>
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1104,7 +1185,10 @@ export default function Resources(): JSX.Element {
                         <label className="field-label">游戏版本</label>
                         <Select
                           value={targetVersionId}
-                          onChange={setTargetVersionId}
+                          onChange={(v) => {
+                            setTargetVersionId(v);
+                            void syncFiltersToTarget(project, v);
+                          }}
                           options={
                             versions.length === 0
                               ? [{ value: '', label: '未安装版本' }]

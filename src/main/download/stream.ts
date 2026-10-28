@@ -13,12 +13,23 @@ import { once } from 'events';
 export interface StallDownloadOptions {
   /** Upstream cancel signal (launcher "cancel download"). */
   signal?: AbortSignal;
-  /** Abort when no bytes arrive for this long. Default 45s. */
+  /** Abort when no bytes arrive for this long. Default 20s. */
   stallMs?: number;
-  /** Abort when no response headers arrive within this long. Default 30s. */
+  /** Abort when no response headers arrive within this long. Default 15s. */
   headerMs?: number;
   /** Error message used when the upstream `signal` fires. */
   cancelMessage?: string;
+  /** Extra request headers (the resource API needs the registered User-Agent). */
+  headers?: Record<string, string>;
+  /**
+   * Called after every chunk with the number of bytes just received.
+   *
+   * Without this the caller can only report progress when a whole file finishes,
+   * which makes the UI freeze during a large download — the "stuck at one number"
+   * symptom. The callback is invoked per chunk (a few KB to a few MB), so callers
+   * should keep the work inside it cheap.
+   */
+  onBytes?: (delta: number) => void;
 }
 
 export async function downloadWithStall(
@@ -26,8 +37,8 @@ export async function downloadWithStall(
   dest: string,
   opts: StallDownloadOptions = {},
 ): Promise<void> {
-  const stallMs = opts.stallMs ?? 45000;
-  const headerMs = opts.headerMs ?? 30000;
+  const stallMs = opts.stallMs ?? 20000;
+  const headerMs = opts.headerMs ?? 15000;
   const cancelMessage = opts.cancelMessage ?? '已取消';
   const controller = new AbortController();
   const onAbort = (): void => controller.abort();
@@ -45,7 +56,7 @@ export async function downloadWithStall(
 
   let ws: ReturnType<typeof createWriteStream> | null = null;
   try {
-    const res = await fetch(url, { signal: controller.signal });
+    const res = await fetch(url, { signal: controller.signal, headers: opts.headers });
     clearTimeout(headerTimer);
     if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
@@ -58,6 +69,7 @@ export async function downloadWithStall(
         if (done) break;
         if (!value || value.length === 0) continue;
         armStall();
+        opts.onBytes?.(value.length);
         if (!ws.write(Buffer.from(value))) await once(ws, 'drain');
       }
     } finally {

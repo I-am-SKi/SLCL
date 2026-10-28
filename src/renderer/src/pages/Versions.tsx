@@ -10,7 +10,7 @@ import type {
   VersionLaunchOverride,
 } from '@shared/types';
 import { formatBytes, notify } from '../lib/toast';
-import { endDownload, startDownload, useActiveDownload } from '../lib/download';
+import { cancelDownload, endDownload, failDownload, startDownload, useDownloadTarget } from '../lib/download';
 import { confirmAction } from '../components/ConfirmDialog';
 import Select from '../components/Select';
 import VersionIcon, { versionIconKind } from '../components/VersionIcon';
@@ -102,8 +102,8 @@ export default function Versions(): JSX.Element {
   const [ovGlobalMax, setOvGlobalMax] = useState(4096);
   const [ovLoading, setOvLoading] = useState(false);
 
-  const download = useActiveDownload();
-  const repairing = download && download.kind === 'repair' ? download.id : null;
+  const activeTask = useDownloadTarget();
+  const repairing = activeTask?.kind === 'repair' ? activeTask.id : null;
 
   const refreshLocal = useCallback(async (): Promise<void> => {
     setLocal(await window.slcl.versions.local());
@@ -214,7 +214,14 @@ export default function Versions(): JSX.Element {
       const n = await window.slcl.versions.repair(id);
       notify(n > 0 ? `已补全 ${n} 个缺失文件` : '文件完整,无需修复', 'success');
     } catch (e) {
-      notify(e instanceof Error ? e.message : String(e), 'error');
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes('取消')) {
+        cancelDownload();
+        notify('已取消修复', 'info');
+      } else {
+        failDownload(msg);
+        notify(msg, 'error');
+      }
     } finally {
       endDownload();
     }
@@ -613,7 +620,7 @@ export default function Versions(): JSX.Element {
                       <button className="btn btn-sm" onClick={() => openRename(v)}>
                         重命名
                       </button>
-                      <button className="btn btn-sm" onClick={() => void repair(v.id)} disabled={download !== null}>
+                      <button className="btn btn-sm" onClick={() => void repair(v.id)} disabled={activeTask !== null}>
                         {repairing === v.id ? '修复中…' : '修复'}
                       </button>
                       <button className="btn btn-sm" onClick={() => void openScreenshots(v)}>

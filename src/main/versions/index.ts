@@ -9,6 +9,7 @@ import { MinecraftFolder, Version } from '@xmcl/core';
 import { open as openZip, openEntryReadStream, readEntry, walkEntriesGenerator } from '@xmcl/unzip';
 import type { DownloadProgress, GameDirInfo, JavaRequirement, LocalMinecraftVersion, ModLoader, RemoteMinecraftVersion, ScreenshotInfo, VersionContentItem, VersionContents, VersionFolderKind, VersionInstallOptions, VersionPaths } from '@shared/types';
 import { getSettings, updateSettings } from '../settings/store';
+import { installFabricApi } from './fabricApi';
 import { detectJava } from '../java/detector';
 import { downloadToFile, listLoaderVersions as listLoaderVersionChoices, resolveLoaderPlan, runJava } from './loaders';
 import { fetchMirrored, mirrorCandidates } from '../download/bmcl';
@@ -207,7 +208,12 @@ async function downloadFile(
       if (activeAbort?.signal.aborted) throw new Error(CANCEL_MSG);
       try {
         onBytes?.(0, true);
-        await downloadWithStall(candidate, dest, { signal: activeAbort?.signal });
+        await downloadWithStall(candidate, dest, {
+          signal: activeAbort?.signal,
+          // Stream bytes through so the manager page can show live speed and a
+          // moving bar instead of only ticking when a file completes.
+          onBytes: (delta) => onBytes?.(delta),
+        });
         if (item.sha1) {
           const actual = await sha1OfFile(dest);
           if (actual.toLowerCase() !== item.sha1.toLowerCase()) {
@@ -253,8 +259,48 @@ async function downloadPool(
   };
   let lastFile = '';
 
+  /**
+   * Progress ticks are throttled to ~5/s.
+   *
+   * Streaming bytes (see downloadWithStall) means onTick fires per network chunk.
+   * With 24 concurrent downloads that is hundreds of IPC messages per second, and
+   * the renderer's re-render cost becomes the bottleneck — the download itself gets
+   * measurably slower. Throttling keeps the UI readable and the transfer fast.
+   */
+  let lastEmit = 0;
+  let pendingTick: PoolTick | null = null;
+  const emit = (force = false): void => {
+    const now = Date.now();
+    const tick: PoolTick = {
+      completed,
+      total,
+      completedBytes,
+      inFlightBytes: sumInFlight(),
+      file: lastFile,
+    };
+    if (!force && now - lastEmit < 200) {
+      pendingTick = tick;
+      return;
+    }
+    lastEmit = now;
+    pendingTick = null;
+    onTick(tick);
+  };
+
+  // Flush a throttled tick so the final state is never lost.
+  const flushTimer = setInterval(() => {
+    if (pendingTick) {
+      pendingTick = null;
+      lastEmit = Date.now();
+      onTick({ completed, total, completedBytes, inFlightBytes: sumInFlight(), file: lastFile });
+    }
+  }, 200);
+
   async function worker(): Promise<void> {
-    while (idx < items.length) {
+    // `errors.length > 0` stops the remaining workers from picking up new items
+    // once a download has definitively failed — otherwise they keep hammering the
+    // network in the background after the pool has already rejected.
+    while (idx < items.length && errors.length === 0) {
       if (activeAbort?.signal.aborted) return;
       const i = idx++;
       const item = items[i];
@@ -263,7 +309,8 @@ async function downloadPool(
       try {
         const bytes = await downloadFile(item, (delta, reset) => {
           inFlight.set(i, reset ? 0 : (inFlight.get(i) ?? 0) + delta);
-          onTick({ completed, total, completedBytes, inFlightBytes: sumInFlight(), file: basename(item.dest) });
+          lastFile = basename(item.dest);
+          emit();
         });
         inFlight.delete(i);
         completed += 1;
@@ -273,12 +320,16 @@ async function downloadPool(
         errors.push(e as Error);
         return;
       }
-      onTick({ completed, total, completedBytes, inFlightBytes: sumInFlight(), file: lastFile });
+      emit();
     }
   }
 
-  const workers = Array.from({ length: Math.min(concurrency, total || 1) }, () => worker());
-  await Promise.all(workers);
+  try {
+    const workers = Array.from({ length: Math.min(concurrency, total || 1) }, () => worker());
+    await Promise.all(workers);
+  } finally {
+    clearInterval(flushTimer);
+  }
   if (activeAbort?.signal.aborted) throw new Error(CANCEL_MSG);
   if (errors.length > 0) throw errors[0];
   void totalBytes;
@@ -360,7 +411,7 @@ async function downloadCoreFiles(
   const items = [...collectCoreDownloads(resolved, root)].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
   const totalBytes = items.reduce((sum, i) => sum + (i.size && i.size >= 0 ? i.size : 0), 0);
   onProgress({ progress: 0, totalBytes, downloadedBytes: 0, task: `下载 ${label} 库文件` });
-  await downloadPool(items, 8, (t) => {
+  await downloadPool(items, 12, (t) => {
     const doneBytes = t.completedBytes + t.inFlightBytes;
     onProgress({
       progress:
@@ -368,6 +419,8 @@ async function downloadCoreFiles(
       totalBytes,
       downloadedBytes: doneBytes,
       task: `下载 ${label} 库文件 (${t.completed}/${t.total})`,
+      totalFiles: t.total,
+      completedFiles: t.completed,
     });
   });
 }
@@ -746,11 +799,13 @@ async function installVanilla(versionId: string, onProgress: (p: DownloadProgres
       totalBytes,
       downloadedBytes: doneBytes,
       task: file ? `下载 ${file} (${completed}/${totalFiles})` : '下载版本文件',
+      totalFiles,
+      completedFiles: completed,
     });
   };
 
   onProgress({ progress: 0, totalBytes, downloadedBytes: 0, task: '下载版本文件与库' });
-  await downloadPool(coreSorted, 8, (t) => {
+  await downloadPool(coreSorted, 12, (t) => {
     report(t.completed, t.completedBytes, t.inFlightBytes, t.file);
   });
   baseBytes += coreItems.reduce((sum, i) => sum + (i.size && i.size > 0 ? i.size : 0), 0);
@@ -762,7 +817,7 @@ async function installVanilla(versionId: string, onProgress: (p: DownloadProgres
       downloadedBytes: baseBytes,
       task: '下载资源文件',
     });
-    await downloadPool(assetSorted, 12, (t) => {
+    await downloadPool(assetSorted, 24, (t) => {
       report(coreItems.length + t.completed, t.completedBytes, t.inFlightBytes, t.file);
     });
   }
@@ -1045,6 +1100,19 @@ export async function installVersion(
     // 6. Record the loader so the UI can show the right icon/badge even after renaming.
     if (options.loader) annotateLoader(finalId, options.loader);
 
+    // 7. Fabric: bundle Fabric API, which nearly every Fabric mod depends on.
+    //    Best-effort — a failure here must not fail the install.
+    if (options.loader === 'fabric' && options.installFabricApi !== false) {
+      onProgress({ progress: 0.99, totalBytes: 0, downloadedBytes: 0, task: '安装 Fabric API…' });
+      const result = await installFabricApi(versionId, join(getVersionGameDir(finalId), 'mods'), activeAbort?.signal);
+      // Surface the outcome in the log stream (onProgress has no text channel for it).
+      if (result.installed) {
+        console.log(`[SLCL] Fabric API 已安装: ${result.installed}`);
+      } else if (result.reason) {
+        console.log(`[SLCL] 跳过 Fabric API: ${result.reason}`);
+      }
+    }
+
     onProgress({ progress: 1, totalBytes: 0, downloadedBytes: 0, task: '安装完成' });
     return finalId;
   } catch (e) {
@@ -1086,7 +1154,7 @@ export async function repairVersion(versionId: string, onProgress: (p: DownloadP
     const totalBytes = missing.reduce((sum, i) => sum + (i.size && i.size >= 0 ? i.size : 0), 0);
     onProgress({ progress: 0, totalBytes, downloadedBytes: 0, task: '补全缺失文件' });
     const missingSorted = [...missing].sort((a, b) => (b.size ?? 0) - (a.size ?? 0));
-    await downloadPool(missingSorted, 8, (t) => {
+    await downloadPool(missingSorted, 12, (t) => {
       const doneBytes = t.completedBytes + t.inFlightBytes;
       onProgress({
         progress:
@@ -1094,6 +1162,8 @@ export async function repairVersion(versionId: string, onProgress: (p: DownloadP
         totalBytes,
         downloadedBytes: doneBytes,
         task: `补全缺失文件 (${t.completed}/${t.total})`,
+        totalFiles: t.total,
+        completedFiles: t.completed,
       });
     });
     return missing.length;

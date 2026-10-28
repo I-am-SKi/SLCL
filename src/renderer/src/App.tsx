@@ -7,12 +7,15 @@ import Home from './pages/Home';
 import Versions from './pages/Versions';
 import Resources from './pages/Resources';
 import Settings from './pages/Settings';
+import Personalize from './pages/Personalize';
 import More from './pages/More';
+import Downloads from './pages/Downloads';
 import { updateDownload, useActiveDownload } from './lib/download';
 import { formatBytes } from './lib/toast';
 import { initAppearance, subscribeAppearance, type Appearance } from './lib/appearance';
+import { restoreSlatt } from './lib/slatt';
 
-type View = 'home' | 'versions' | 'resources' | 'settings' | 'more';
+type View = 'home' | 'versions' | 'resources' | 'downloads' | 'settings' | 'personalize' | 'more';
 
 function Icon({ d }: { d: string }): ReactNode {
   return (
@@ -27,12 +30,14 @@ const NAV: Array<{ id: View; label: string; d: string }> = [
   { id: 'versions', label: '版本管理', d: 'M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16zM3.3 7l8.7 5 8.7-5M12 22V12' },
   { id: 'resources', label: '资源下载', d: 'M12 3v12m0 0l4-4m-4 4l-4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2' },
   { id: 'settings', label: '游戏设置', d: 'M12 15a3 3 0 1 0 0-6 3 3 0 0 0 0 6zM19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z' },
-  { id: 'more', label: '启动器个性化', d: 'M12 5a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z' },
+  // Palette: three paint dots inside an artist's palette — reads as "appearance".
+  { id: 'personalize', label: '启动器个性化', d: 'M12 21a9 9 0 1 1 0-18c4.97 0 9 3.58 9 8 0 2.21-1.79 4-4 4h-2a2 2 0 0 0 0 4 2 2 0 0 1-2 2zM8 12.5h.01M10.5 8.5h.01M15 8h.01' },
+  // Three dots, moved here from the old personalisation entry.
+  { id: 'more', label: '更多', d: 'M12 5a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 13a1 1 0 1 0 0-2 1 1 0 0 0 0 2zM12 21a1 1 0 1 0 0-2 1 1 0 0 0 0 2z' },
 ];
 
 export default function App(): JSX.Element {
   const [view, setView] = useState<View>('home');
-  const download = useActiveDownload();
   const [maximized, setMaximized] = useState(false);
   const [appearance, setAppearance] = useState<Appearance>(() => ({
     colorMode: 'dark',
@@ -50,6 +55,12 @@ export default function App(): JSX.Element {
   // Crash reports are app-wide: the user may have navigated away by the time the
   // game dies, so the dialog host lives here rather than inside Home.
   useEffect(() => window.slcl.launch.onCrash(showCrashReport), []);
+
+  // Validate the SLATT team token once per start so the home badge can appear
+  // without the user opening the 更多 page first.
+  useEffect(() => {
+    void restoreSlatt();
+  }, []);
 
   // Apply persisted theme + background once at startup, then subscribe to changes.
   useEffect(() => {
@@ -155,41 +166,67 @@ export default function App(): JSX.Element {
           <div key={view} className="page-transition">
             {view === 'home' && <Home onNavigate={setView} />}
             {view === 'versions' && <Versions />}
-            {view === 'resources' && <Resources />}
+            {view === 'resources' && <Resources onNavigate={setView} />}
             {view === 'settings' && <Settings />}
+            {view === 'personalize' && <Personalize />}
+            {view === 'downloads' && <Downloads />}
             {view === 'more' && <More />}
           </div>
         </main>
       </div>
 
-      {download && (
-        <div className="global-download">
-          <div className="row-between">
-            <span className="global-download-title">
-              {download.kind === 'install' ? `正在安装 ${download.id}` : `正在修复 ${download.id}`}
-            </span>
-            <div className="row" style={{ gap: 8 }}>
-              <span className="muted small">
-                {formatBytes(download.progress.downloadedBytes)} / {formatBytes(download.progress.totalBytes)}
-              </span>
-              <button className="btn btn-danger" onClick={() => window.slcl.versions.cancel()}>
-                取消下载
-              </button>
-            </div>
-          </div>
-          <div className="progress-track" style={{ marginTop: 8 }}>
-            <div className="progress-fill" style={{ width: `${Math.round(download.progress.progress * 100)}%` }} />
-          </div>
-          <p className="muted small" style={{ margin: '6px 0 0' }}>
-            {download.progress.task} · 可切换到其他页面,下载会在后台继续 · 由 BMCLAPI 加速
-          </p>
-        </div>
-      )}
+      <GlobalDownloadBar onOpen={() => setView('downloads')} />
 
       <Toaster />
       <ConfirmHost />
       <CrashDialogHost />
       <Splash />
+    </div>
+  );
+}
+
+/**
+ * Floating progress bar.
+ *
+ * Kept out of `App` on purpose: it re-renders on every progress tick (~5/s), and
+ * holding that state in `App` would re-render the whole page tree — noticeably
+ * janky while scrolling the resource list during a download.
+ */
+function GlobalDownloadBar({ onOpen }: { onOpen: () => void }): JSX.Element | null {
+  const download = useActiveDownload();
+  if (!download) return null;
+
+  const { progress, speed, kind, id } = download;
+  const pct = Math.round(progress.progress * 100);
+
+  return (
+    <div className="global-download">
+      <div className="row-between">
+        <button className="global-download-title link-btn" onClick={onOpen} title="打开下载管理">
+          {kind === 'install' ? `正在安装 ${id}` : `正在修复 ${id}`}
+        </button>
+        <div className="row" style={{ gap: 8 }}>
+          <span className="muted small">
+            {progress.totalBytes > 0
+              ? `${formatBytes(progress.downloadedBytes)} / ${formatBytes(progress.totalBytes)}`
+              : formatBytes(progress.downloadedBytes)}
+            {speed > 0 && ` · ${formatBytes(speed)}/s`}
+            {progress.totalFiles ? ` · ${progress.completedFiles ?? 0}/${progress.totalFiles} 个文件` : ''}
+          </span>
+          <button className="btn" onClick={onOpen}>
+            详情
+          </button>
+          <button className="btn btn-danger" onClick={() => window.slcl.versions.cancel()}>
+            取消下载
+          </button>
+        </div>
+      </div>
+      <div className="progress-track" style={{ marginTop: 8 }}>
+        <div className="progress-fill" style={{ width: `${pct}%` }} />
+      </div>
+      <p className="muted small" style={{ margin: '6px 0 0' }}>
+        {progress.task} · 可切换到其他页面,下载会在后台继续
+      </p>
     </div>
   );
 }

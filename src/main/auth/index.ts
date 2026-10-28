@@ -3,8 +3,15 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
 import { join } from 'path';
 import { app } from 'electron';
 import { MicrosoftAuthenticator, offline } from '@xmcl/user';
-import type { AccountProfile, LoginProgress, MicrosoftDeviceCode, SkinLookupResult } from '@shared/types';
+import type {
+  AccountProfile,
+  LittleSkinRoles,
+  LoginProgress,
+  MicrosoftDeviceCode,
+  SkinLookupResult,
+} from '@shared/types';
 import { getSettings, updateSettings } from '../settings/store';
+import { forgetCredential, listRemembered, recallCredential, rememberCredential } from './credentials';
 
 /**
  * The public client id of the official Minecraft launcher.
@@ -313,7 +320,13 @@ async function yggdrasilRequest<T>(path: string, body: unknown, method = 'POST')
 }
 
 /** Persist a LittleSkin account (replacing any previous entry for the same UUID). */
-function saveLittleSkinAccount(profile: YggdrasilProfile, accessToken: string, clientToken: string): AccountProfile {
+function saveLittleSkinAccount(
+  profile: YggdrasilProfile,
+  accessToken: string,
+  clientToken: string,
+  profiles: YggdrasilProfile[],
+  loginName: string,
+): AccountProfile {
   const s = getSettings();
   const account: AccountProfile = {
     id: `littleskin:${profile.id}`,
@@ -322,6 +335,8 @@ function saveLittleSkinAccount(profile: YggdrasilProfile, accessToken: string, c
     uuid: profile.id,
     accessToken,
     clientToken,
+    profiles: profiles.map((p) => ({ id: p.id, name: p.name })),
+    loginName,
     lastLoginAt: new Date().toISOString(),
   };
   const accounts = s.accounts.filter((a) => a.id !== account.id);
@@ -330,8 +345,33 @@ function saveLittleSkinAccount(profile: YggdrasilProfile, accessToken: string, c
   return account;
 }
 
+/**
+ * Bind a freshly issued, *unbound* token to a profile.
+ *
+ * Yggdrasil only allows this once per token: after binding, further attempts are
+ * rejected with "Access token already has a profile assigned". Binding is however
+ * mandatory for gameplay — an unbound token is refused by the session join
+ * endpoint (403), so multiplayer would break without it.
+ */
+async function bindLittleSkinProfile(
+  accessToken: string,
+  clientToken: string,
+  profile: YggdrasilProfile,
+): Promise<YggdrasilAuthResponse> {
+  return yggdrasilRequest<YggdrasilAuthResponse>('/authserver/refresh', {
+    accessToken,
+    clientToken,
+    requestUser: false,
+    selectedProfile: { id: profile.id, name: profile.name },
+  });
+}
+
 /** Sign in to LittleSkin with an email/username + password (Yggdrasil authenticate). */
-export async function loginLittleSkin(username: string, password: string): Promise<AccountProfile> {
+export async function loginLittleSkin(
+  username: string,
+  password: string,
+  remember = true,
+): Promise<AccountProfile> {
   const user = username.trim();
   if (!user) throw new Error('请输入 LittleSkin 邮箱或用户名');
   if (!password) throw new Error('请输入密码');
@@ -353,13 +393,266 @@ export async function loginLittleSkin(username: string, password: string): Promi
     throw e;
   }
 
-  const profile = data.selectedProfile ?? data.availableProfiles?.[0];
-  if (!profile || !data.accessToken) throw new Error('LittleSkin 未返回角色信息,请先在 LittleSkin 官网创建角色');
+  if (!data.accessToken) throw new Error('LittleSkin 未返回登录凭证');
 
-  skinMemo.delete(`littleskin:${profile.id}`);
-  return saveLittleSkinAccount(profile, data.accessToken, data.clientToken ?? clientToken);
+  // Keep the full character list: the Yggdrasil API only exposes it in this
+  // response, and role switching later depends on it.
+  const available = data.availableProfiles?.length
+    ? data.availableProfiles
+    : data.selectedProfile
+      ? [data.selectedProfile]
+      : [];
+  if (available.length === 0) throw new Error('LittleSkin 未返回角色信息,请先在 LittleSkin 官网创建角色');
+
+  let token = data.accessToken;
+  let bound = data.selectedProfile;
+
+  if (!bound) {
+    // Pick the character this launcher already knew about, so re-logging in does
+    // not silently move the user to a different character.
+    const previous = getSettings().accounts.find((a) => a.id === `littleskin:${available[0].id}`);
+    const remembered = previous ? available.find((p) => p.name === previous.name) : undefined;
+    const target = remembered ?? available[0];
+    try {
+      const res = await bindLittleSkinProfile(token, data.clientToken ?? clientToken, target);
+      token = res.accessToken ?? token;
+      bound = res.selectedProfile ?? target;
+    } catch {
+      // Binding failed; fall back to the unbound token. Launching still works for
+      // single-player, and the account stays switchable.
+      bound = target;
+    }
+  }
+
+  const finalClientToken = data.clientToken ?? clientToken;
+  skinMemo.delete(`littleskin:${bound.id}`);
+
+  // Remember (or forget) the password so later role switches do not have to ask
+  // for it again — Yggdrasil only issues unbound tokens from authenticate().
+  if (remember) rememberCredential(user, password);
+  else forgetCredential(user);
+
+  return saveLittleSkinAccount(bound, token, finalClientToken, available, user);
 }
 
+/**
+ * Remembered LittleSkin logins, including the password, for prefilling the login
+ * form. The password is included on purpose: the user asked for one-click login,
+ * and it is only readable after DPAPI decryption under the same OS user.
+ */
+export function listRememberedLogins(): Array<{ loginName: string; password: string }> {
+  return listRemembered().map((loginName) => ({
+    loginName,
+    password: recallCredential(loginName) ?? '',
+  }));
+}
+
+/** Drop a remembered login (e.g. the password was changed on the website). */
+export function forgetRememberedLogin(loginName: string): void {
+  forgetCredential(loginName);
+}
+/** Narrow a stored account to a LittleSkin one, or explain why it isn't usable. */
+function requireLittleSkinAccount(accountId: string): AccountProfile {
+  const account = getSettings().accounts.find((a) => a.id === accountId);
+  if (!account) throw new Error('未找到该账户');
+  if (account.type !== 'littleskin') throw new Error('该账户不是 LittleSkin 账户');
+  if (!account.accessToken) throw new Error('LittleSkin 登录信息不完整，请重新登录');
+  return account;
+}
+
+
+/**
+ * List the Minecraft characters owned by a LittleSkin account.
+ *
+ * The list comes from the authenticate response, which we persist on the account.
+ * Accounts created before that field existed only have one character recorded, so
+ * they fall back to a refresh — some servers include `availableProfiles` there as
+ * well, and if not the user is told to sign in again.
+ */
+export async function listLittleSkinRoles(
+  accountId: string,
+  password?: string,
+  loginName?: string,
+): Promise<LittleSkinRoles> {
+  const account = requireLittleSkinAccount(accountId);
+  let profiles = account.profiles ?? [];
+  let currentId = account.uuid;
+
+  // With a password we can read the authoritative list: authenticate issues an
+  // unbound token and returns every character. Accounts created before the
+  // launcher stored `profiles` need this, since refresh alone does not include
+  // the list.
+  if (password) {
+    const identifier = (loginName ?? account.loginName ?? '').trim();
+    if (identifier.includes('@')) {
+      try {
+        const auth = await yggdrasilRequest<YggdrasilAuthResponse>('/authserver/authenticate', {
+          agent: { name: 'Minecraft', version: 1 },
+          username: identifier,
+          password,
+          clientToken: randomUUID().replace(/-/g, ''),
+          requestUser: false,
+        });
+        const available = auth.availableProfiles ?? [];
+        if (available.length > 0) {
+          profiles = available.map((p) => ({ id: p.id, name: p.name }));
+          const s = getSettings();
+          const updated: AccountProfile = {
+            ...account,
+            profiles,
+            loginName: identifier,
+          };
+          updateSettings({ accounts: s.accounts.map((a) => (a.id === account.id ? updated : a)) });
+        }
+      } catch (e) {
+        if (e instanceof YggdrasilAuthError) throw new Error(`LittleSkin 密码验证失败：${e.message}`);
+        throw e;
+      }
+    }
+  }
+  if (profiles.length === 0) {
+    // Accounts signed in before the launcher stored the list: a refresh may still
+    // return it, depending on the server. Never fatal — fall back to the character
+    // we know about rather than showing an error.
+    try {
+      const res = await yggdrasilRequest<YggdrasilAuthResponse>('/authserver/refresh', {
+        accessToken: account.accessToken,
+        clientToken: account.clientToken,
+        requestUser: false,
+      });
+      const available = res.availableProfiles ?? [];
+      if (available.length > 0) {
+        profiles = available.map((p) => ({ id: p.id, name: p.name }));
+        currentId = res.selectedProfile?.id ?? currentId;
+        // The refresh rotated the token; keep the account usable.
+        const s = getSettings();
+        const updated: AccountProfile = {
+          ...account,
+          accessToken: res.accessToken ?? account.accessToken,
+          clientToken: res.clientToken ?? account.clientToken,
+          uuid: currentId,
+          name: res.selectedProfile?.name ?? account.name,
+          profiles,
+        };
+        updateSettings({ accounts: s.accounts.map((a) => (a.id === account.id ? updated : a)) });
+      }
+    } catch {
+      /* fall through to the single-character fallback */
+    }
+  }
+
+  if (profiles.length === 0) {
+    // Only the current character is known. Switching still works for it (a no-op),
+    // and the UI explains that a re-login reveals the rest.
+    return {
+      roles: [{ id: account.uuid, name: account.name, selected: true }],
+      needsRelogin: true,
+    };
+  }
+
+  return {
+    roles: profiles.map((p) => ({ id: p.id, name: p.name, selected: p.id === currentId })),
+    needsRelogin: false,
+  };
+}
+
+/**
+ * Switch the LittleSkin account to another of its characters.
+ *
+ * Per the Yggdrasil spec this is a refresh carrying `selectedProfile`; the server
+ * rotates the token and binds it to the new character. The launcher then updates
+ * the stored uuid/name so launching and the skin lookup follow the new character.
+ */
+export async function switchLittleSkinRole(
+  accountId: string,
+  roleId: string,
+  password?: string,
+  loginName?: string,
+): Promise<AccountProfile> {
+  const account = requireLittleSkinAccount(accountId);
+  const identifier = (loginName ?? account.loginName ?? '').trim();
+  if (!identifier) throw new Error('请填写 LittleSkin 邮箱账号');
+  if (!identifier.includes('@')) {
+    throw new Error('切换角色需要使用邮箱登录。用角色名登录会立即绑定角色，无法再切换。');
+  }
+
+  // Prefer the remembered password so switching is one click, like other launchers.
+  // The explicit argument wins (e.g. after the stored one stopped working).
+  let secret = password?.trim() ?? '';
+  if (!secret) {
+    const remembered = recallCredential(identifier);
+    if (remembered) secret = remembered;
+  }
+  if (!secret) {
+    throw new Error('需要 LittleSkin 密码才能切换角色，请在弹窗中输入（可勾选记住密码）');
+  }
+
+  const clientToken = randomUUID().replace(/-/g, '');
+
+  // Switching needs an UNBOUND token, and only authenticate issues one. A bound
+  // token cannot be rebound (Yggdrasil rejects it), which is why credentials are
+  // required here rather than reusing the stored token.
+  let auth: YggdrasilAuthResponse;
+  try {
+    auth = await yggdrasilRequest<YggdrasilAuthResponse>('/authserver/authenticate', {
+      agent: { name: 'Minecraft', version: 1 },
+      username: identifier,
+      password: secret,
+      clientToken,
+      requestUser: false,
+    });
+  } catch (e) {
+    // A rejected stored password must not be reused forever.
+    if (!password) forgetCredential(identifier);
+    if (e instanceof YggdrasilAuthError) throw new Error(`LittleSkin 密码验证失败：${e.message}`);
+    throw e;
+  }
+
+  if (!auth.accessToken) throw new Error('LittleSkin 未返回登录凭证');
+  if (auth.selectedProfile) {
+    throw new Error('该账号登录时已被绑定角色，无法切换。请改用邮箱登录。');
+  }
+
+  const available = auth.availableProfiles ?? [];
+  if (available.length === 0) throw new Error('LittleSkin 未返回角色列表，请先到官网创建角色');
+
+  const target = available.find((p) => p.id === roleId);
+  if (!target) throw new Error('找不到该角色，请重新读取角色列表');
+
+  const bound = await bindLittleSkinProfile(auth.accessToken, auth.clientToken ?? clientToken, target);
+
+  // A successful switch proves the credentials work, so make sure they are kept
+  // for next time even when the caller only supplied them ad hoc.
+  rememberCredential(identifier, secret);
+
+  // The cached skin belongs to the previous character.
+  skinMemo.delete(accountId);
+  const oldSkin = liveSkinPaths(account.uuid);
+  rmSync(oldSkin.png, { force: true });
+  rmSync(oldSkin.meta, { force: true });
+
+  const updated: AccountProfile = {
+    ...account,
+    id: `littleskin:${bound.selectedProfile?.id ?? target.id}`,
+    accessToken: bound.accessToken ?? auth.accessToken,
+    clientToken: bound.clientToken ?? auth.clientToken ?? clientToken,
+    uuid: bound.selectedProfile?.id ?? target.id,
+    name: bound.selectedProfile?.name ?? target.name,
+    profiles: available.map((p) => ({ id: p.id, name: p.name })),
+    loginName: identifier,
+    lastLoginAt: new Date().toISOString(),
+  };
+  const s = getSettings();
+  // The account id embeds the profile uuid, so the id can change when the
+  // character does — replace the old entry rather than appending a duplicate.
+  const accounts = s.accounts.filter((a) => a.id !== account.id && a.id !== updated.id);
+  accounts.push(updated);
+  updateSettings({
+    accounts,
+    selectedAccountId: s.selectedAccountId === account.id ? updated.id : s.selectedAccountId,
+  });
+  return updated;
+}
 /**
  * Ensure a LittleSkin account has a usable access token.
  * Yggdrasil access tokens can expire; refresh with the stored clientToken when needed.
@@ -656,15 +949,23 @@ async function fetchLittleSkinSkin(uuid: string): Promise<string | null> {
 /**
  * Get the skin (data URL) to display for an account.
  * Priority: user-chosen local skin -> cached online skin -> live fetch -> Steve.
+ * LittleSkin accounts skip the local skin entirely — their skin is owned by
+ * LittleSkin and edited on the website, so the online copy always wins there.
  * `force` bypasses the in-memory and TTL caches (the "refresh preview" action); in that
  * mode a failed download is reported as an error instead of silently reusing stale data.
  */
 export async function getSkin(accountId: string, force = false): Promise<string> {
-  // 1. A user-chosen skin is authoritative and instant.
-  const local = readLocalSkin(accountId);
-  if (local) {
-    skinMemo.set(accountId, local);
-    return local;
+  const account = getSettings().accounts.find((a) => a.id === accountId);
+
+  // 1. A user-chosen local skin is authoritative — except for LittleSkin accounts.
+  //    There the skin lives on LittleSkin's server and is changed in the website
+  //    closet, so a leftover local file would mask the account's real skin.
+  if (account?.type !== 'littleskin') {
+    const local = readLocalSkin(accountId);
+    if (local) {
+      skinMemo.set(accountId, local);
+      return local;
+    }
   }
 
   // 2. In-memory memo (sub-millisecond).
@@ -673,7 +974,6 @@ export async function getSkin(accountId: string, force = false): Promise<string>
     if (memo) return memo;
   }
 
-  const account = getSettings().accounts.find((a) => a.id === accountId);
   const online = account?.type === 'microsoft' || account?.type === 'littleskin';
 
   if (account && online) {
@@ -763,12 +1063,47 @@ function getMcAccessToken(accountId: string): string {
 }
 
 /**
+ * Read a PNG's pixel dimensions from its IHDR chunk (offsets 16..23).
+ * Returns null when the buffer is not a PNG.
+ */
+export function pngDimensions(buf: Buffer): { width: number; height: number } | null {
+  if (buf.length < 24) return null;
+  if (buf[0] !== 0x89 || buf[1] !== 0x50 || buf[2] !== 0x4e || buf[3] !== 0x47) return null;
+  return { width: buf.readUInt32BE(16), height: buf.readUInt32BE(20) };
+}
+
+/**
+ * Mojang's skin API only accepts the two canonical sizes: 64x64 (modern) and
+ * 64x32 (legacy). Higher-resolution "HD" skins (128x128 is common in the team
+ * library) are rejected by the server, so catch them locally and explain why
+ * instead of surfacing a raw API error.
+ */
+export function isUploadableSkinSize(buf: Buffer): boolean {
+  const d = pngDimensions(buf);
+  if (!d) return false;
+  return d.width === 64 && (d.height === 64 || d.height === 32);
+}
+
+/** Throwing variant of `isUploadableSkinSize`, with a user-facing message. */
+export function assertUploadableSkin(buf: Buffer): void {
+  const d = pngDimensions(buf);
+  if (!d) throw new Error('皮肤文件不是有效的 PNG');
+  if (d.width === 64 && (d.height === 64 || d.height === 32)) return;
+  throw new Error(
+    `Minecraft 官方只接受 64×64 或 64×32 的皮肤，这款是 ${d.width}×${d.height}，无法上传到正版账号`,
+  );
+}
+
+/**
  * Upload a skin (PNG) for a Microsoft account.
  * `pngBase64` is the raw PNG bytes base64-encoded.
  */
 export async function uploadSkin(accountId: string, variant: SkinVariant, pngBase64: string): Promise<void> {
-  const token = getMcAccessToken(accountId);
   const buf = Buffer.from(pngBase64, 'base64');
+  // Validate the size before touching the network: an unsupported resolution would
+  // otherwise come back as an opaque server error.
+  assertUploadableSkin(buf);
+  const token = getMcAccessToken(accountId);
   const blob = new Blob([buf], { type: 'image/png' });
   const form = new FormData();
   form.append('variant', variant);

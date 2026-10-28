@@ -1,10 +1,18 @@
 import { useEffect, useRef, useState, type JSX } from 'react';
-import type { AccountProfile, AppSettings, GameOutput, LocalMinecraftVersion, MicrosoftDeviceCode } from '@shared/types';
+import type {
+  AccountProfile,
+  AppSettings,
+  GameOutput,
+  LittleSkinRole,
+  LocalMinecraftVersion,
+  MicrosoftDeviceCode,
+} from '@shared/types';
 import { notify } from '../lib/toast';
 import SkinHead from '../components/SkinHead';
 import Select from '../components/Select';
 import VersionIcon, { versionIconKind } from '../components/VersionIcon';
 import { confirmAction } from '../components/ConfirmDialog';
+import { getSlattSession, subscribeSlatt } from '../lib/slatt';
 
 interface HomeProps {
   onNavigate: (view: 'versions' | 'settings') => void;
@@ -24,6 +32,14 @@ const ACCOUNT_TYPE_SHORT: Record<AccountProfile['type'], string> = {
   littleskin: 'LittleSkin',
 };
 
+/**
+ * LittleSkin's website pages. Skins for a LittleSkin account are owned by the site,
+ * not by the launcher, so the useful actions are links out rather than local edits:
+ *   closet — 我的衣柜, where skins are uploaded and picked
+ *   player — 角色管理, where a skin is bound to the Minecraft character
+ */
+const LITTLESKIN_CLOSET_URL = 'https://littleskin.cn/user/closet';
+
 export default function Home({ onNavigate }: HomeProps): JSX.Element {
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [accounts, setAccounts] = useState<AccountProfile[]>([]);
@@ -36,6 +52,8 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
   const [logs, setLogs] = useState<GameOutput[]>([]);
   /** The log panel starts collapsed: it is a debugging aid, not the main content. */
   const [logOpen, setLogOpen] = useState(false);
+  /** Signed-in SLATT team member (drives the verification badge), or null. */
+  const [slattUser, setSlattUser] = useState(() => getSlattSession()?.user ?? null);
   const [skin, setSkin] = useState<string>('');
   const [skinLoading, setSkinLoading] = useState(false);
   const [refreshingSkin, setRefreshingSkin] = useState(false);
@@ -78,9 +96,27 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
   const [lsName, setLsName] = useState('');
   const [lsPassword, setLsPassword] = useState('');
   const [lsBusy, setLsBusy] = useState(false);
+  /** Whether to store the password (DPAPI-encrypted) for one-click switching. */
+  const [lsRemember, setLsRemember] = useState(true);
+  /** Remembered LittleSkin logins, used to prefill the form. */
+  const [remembered, setRemembered] = useState<Array<{ loginName: string; password: string }>>([]);
 
   // ---- skin modal ----
   const [skinOpen, setSkinOpen] = useState(false);
+
+  // ---- LittleSkin role switcher ----
+  const [roleOpen, setRoleOpen] = useState(false);
+  const [roles, setRoles] = useState<LittleSkinRole[] | null>(null);
+  const [rolesLoading, setRolesLoading] = useState(false);
+  const [roleError, setRoleError] = useState('');
+  const [roleChoice, setRoleChoice] = useState('');
+  /** True when only the current character is known (account signed in before profiles were stored). */
+  const [needsRelogin, setNeedsRelogin] = useState(false);
+  const [roleBusy, setRoleBusy] = useState(false);
+  /** Yggdrasil only binds a character to a fresh token, so switching needs the password. */
+  const [rolePassword, setRolePassword] = useState('');
+  const [roleLoginName, setRoleLoginName] = useState('');
+
   const [skinVariant, setSkinVariant] = useState<'classic' | 'slim'>('classic');
   const [pendingSkin, setPendingSkin] = useState<string | null>(null);
   const [pendingSkinName, setPendingSkinName] = useState('');
@@ -182,6 +218,9 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Keep the membership badge in sync with logins/restores elsewhere in the app.
+  useEffect(() => subscribeSlatt((s) => setSlattUser(s?.user ?? null)), []);
+
   useEffect(() => {
     const unsub = window.slcl.accounts.onLoginProgress((p) => {
       if (p.status === 'device_code' && p.deviceCode) {
@@ -196,12 +235,46 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
     consoleRef.current?.scrollTo({ top: consoleRef.current.scrollHeight });
   }, [logs]);
 
+  /**
+   * Load remembered LittleSkin logins and prefill the sign-in form, so a returning
+   * user only has to press the button. Passwords are DPAPI-encrypted at rest.
+   */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        const list = await window.slcl.accounts.rememberedLogins();
+        if (cancelled) return;
+        setRemembered(list);
+        const first = list[0];
+        if (first) {
+          setLsName((prev) => prev || first.loginName);
+          setLsPassword((prev) => prev || first.password);
+        }
+      } catch {
+        /* prefilling is best-effort */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   async function refreshAccounts(selectId?: string): Promise<void> {
     const accs = await window.slcl.accounts.list();
     setAccounts(accs);
     const s = await window.slcl.settings.get();
     setSettings(s);
-    setAccountId(selectId ?? s.selectedAccountId ?? accs[0]?.id ?? '');
+    // A LittleSkin account's id embeds its character uuid, so the id handed in may
+    // be stale after a role switch. Only honour it when it still resolves, and
+    // otherwise trust the persisted selection rather than selecting nothing.
+    const wanted =
+      selectId && accs.some((a) => a.id === selectId)
+        ? selectId
+        : s.selectedAccountId && accs.some((a) => a.id === s.selectedAccountId)
+          ? s.selectedAccountId
+          : accs[0]?.id ?? '';
+    setAccountId(wanted);
   }
 
   async function changeAccount(id: string): Promise<void> {
@@ -265,9 +338,17 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
     }
     setLsBusy(true);
     try {
-      const acc = await window.slcl.accounts.loginLittleSkin(lsName.trim(), lsPassword);
-      setLsName('');
-      setLsPassword('');
+      const acc = await window.slcl.accounts.loginLittleSkin(lsName.trim(), lsPassword, lsRemember);
+      // Refresh the remembered list so a just-saved password is available for the
+      // role switcher and for the next sign-in.
+      const list = await window.slcl.accounts.rememberedLogins().catch(() => []);
+      setRemembered(list);
+      if (lsRemember) {
+        const saved = list.find((r) => r.loginName.toLowerCase() === lsName.trim().toLowerCase());
+        setLsPassword(saved?.password ?? '');
+      } else {
+        setLsPassword('');
+      }
       await refreshAccounts(acc.id);
       setLoginOpen(false);
       notify(`已登录 LittleSkin 账户 ${acc.name}`, 'success');
@@ -322,6 +403,86 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
     reader.readAsDataURL(file);
     // Allow re-picking the same file after a reset.
     e.target.value = '';
+  }
+
+  /**
+   * Detect the account's LittleSkin characters.
+   *
+   * Without a password we can only show what was cached at login. Passing one
+   * re-authenticates and reads the authoritative list, which is the only way for
+   * accounts that signed in before the launcher stored it.
+   */
+  async function detectRoles(password?: string): Promise<void> {
+    if (!accountId) return;
+    setRoleError('');
+    setRolesLoading(true);
+    try {
+      const result = await window.slcl.accounts.littleSkinRoles(accountId, password, roleLoginName);
+      setRoles(result.roles);
+      setNeedsRelogin(result.needsRelogin);
+      setRoleChoice((prev) =>
+        result.roles.some((r) => r.id === prev)
+          ? prev
+          : (result.roles.find((r) => r.selected)?.id ?? result.roles[0]?.id ?? ''),
+      );
+    } catch (e) {
+      setRoleError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setRolesLoading(false);
+    }
+  }
+
+  /** Open the switcher: read the cached list, and let the user verify for the rest. */
+  async function openRoleSwitcher(): Promise<void> {
+    if (!accountId) return;
+    setRoleOpen(true);
+    setRoles(null);
+    setRoleError('');
+    setRoleChoice('');
+    setNeedsRelogin(false);
+    setRolePassword('');
+    setRoleLoginName(selectedAccount?.loginName ?? '');
+    await detectRoles();
+  }
+  /** Apply the chosen role and re-read the skin for the newly bound character. */
+  async function confirmRoleSwitch(): Promise<void> {
+    if (!accountId || !roleChoice || roleBusy) return;
+    const current = roles?.find((r) => r.selected);
+    if (current?.id === roleChoice) {
+      notify('已经是当前角色，无需切换', 'info');
+      setRoleOpen(false);
+      return;
+    }
+    setRoleBusy(true);
+    try {
+      // No password prompt: the remembered credential is used automatically. The
+      // dialog's password field only matters when nothing is stored yet.
+      const updated = await window.slcl.accounts.switchRole(
+        accountId,
+        roleChoice,
+        rolePassword || undefined,
+        roleLoginName,
+      );
+      // The returned id differs from the old one (it embeds the character uuid),
+      // so continue with `updated.id` — using the stale id would leave the account
+      // selector with no matching option.
+      await refreshAccounts(updated.id);
+      // The character changed, so its skin did too.
+      delete skinCacheRef.current[accountId];
+      skinCacheRef.current[updated.id] = '';
+      const fresh = await window.slcl.accounts.getSkin(updated.id, true).catch(() => '');
+      if (fresh) {
+        skinCacheRef.current[updated.id] = fresh;
+        setSkin(fresh);
+      }
+      notify(`已切换到角色「${updated.name}」`, 'success');
+      setRoleOpen(false);
+      setRoles(null);
+    } catch (e) {
+      notify(e instanceof Error ? e.message : String(e), 'error');
+    } finally {
+      setRoleBusy(false);
+    }
   }
 
   /** Force a fresh skin lookup (bypasses launcher caches and re-downloads). */
@@ -523,6 +684,21 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
   const selectedAccount = accounts.find((a) => a.id === accountId);
   const selectedVersion = versions.find((v) => v.id === versionId);
 
+  /**
+   * True when a LittleSkin password is stored for the selected account, in which
+   * case switching needs no input and the credential fields stay hidden.
+   */
+  const hasStoredCredential =
+    selectedAccount?.type === 'littleskin' &&
+    Boolean(
+      selectedAccount.loginName &&
+        remembered.some(
+          (r) =>
+            r.loginName.toLowerCase() === selectedAccount.loginName?.toLowerCase() && r.password,
+        ),
+    );
+
+
   return (
     <div>
       <h1 className="page-title">主页</h1>
@@ -535,8 +711,23 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
           <div className="skin-avatar-wrap">
             <button
               className="skin-avatar"
-              onClick={() => accountId && setSkinOpen(true)}
-              title={accountId ? '点击更换皮肤' : '请先添加账户'}
+              onClick={() => {
+                if (!accountId) return;
+                // A LittleSkin account's skin cannot be changed here — send the user
+                // to the closet where it actually lives.
+                if (selectedAccount?.type === 'littleskin') {
+                  void window.slcl.openExternal(LITTLESKIN_CLOSET_URL);
+                } else {
+                  setSkinOpen(true);
+                }
+              }}
+              title={
+                !accountId
+                  ? '请先添加账户'
+                  : selectedAccount?.type === 'littleskin'
+                    ? '点击前往 LittleSkin 我的衣柜'
+                    : '点击更换皮肤'
+              }
             >
               {accountId ? <SkinHead skin={skin} size={64} /> : <span className="skin-avatar-empty">?</span>}
               {skinLoading && accountId && <span className="skin-avatar-loading" />}
@@ -559,11 +750,33 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
             <div className="account-sub">
               {selectedAccount ? ACCOUNT_TYPE_LABEL[selectedAccount.type] : '请添加或选择一个账户'}
             </div>
+            {slattUser && (
+              // The role is part of the badge: a captain should not read "团队成员".
+              // `roleLabel` comes from the main process and already maps group_id
+              // to 团队成员 / 团队主管 / 团队管理员.
+              <div
+                className="slatt-badge"
+                title={`已验证的 SLATT ${slattUser.roleLabel}：${slattUser.username}`}
+              >
+                <span className="slatt-badge-check" aria-hidden="true">
+                  ✓
+                </span>
+                已认证 SLATT {slattUser.roleLabel}
+                <span className="slatt-badge-sep">·</span>
+                <span className="slatt-badge-name">{slattUser.username}</span>
+              </div>
+            )}
           </div>
 
           <span className="spacer" />
 
-          <div className="row" style={{ gap: 8 }}>
+          {/*
+            Account controls live in a fixed right-hand column: the selector on top and
+            the actions underneath. Keeping them in one wrapped row made the buttons
+            fall to a second line (and look broken) once a LittleSkin account added a
+            third action.
+          */}
+          <div className="account-actions">
             <Select
               value={accountId}
               onChange={(v) => void changeAccount(v)}
@@ -574,14 +787,25 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
                   : accounts.map((a) => ({ value: a.id, label: `${a.name} (${ACCOUNT_TYPE_SHORT[a.type]})` }))
               }
             />
-            <button className="btn btn-primary" onClick={() => setLoginOpen(true)}>
-              添加账户
-            </button>
-            {selectedAccount && (
-              <button className="btn btn-danger" onClick={() => removeAccount(selectedAccount.id)}>
-                删除
+            <div className="account-action-row">
+              <button className="btn btn-primary" onClick={() => setLoginOpen(true)}>
+                添加账户
               </button>
-            )}
+              {selectedAccount?.type === 'littleskin' && (
+                <button
+                  className="btn"
+                  onClick={() => void openRoleSwitcher()}
+                  title="检测并切换该账户在 LittleSkin 的角色"
+                >
+                  切换角色
+                </button>
+              )}
+              {selectedAccount && (
+                <button className="btn btn-danger" onClick={() => removeAccount(selectedAccount.id)}>
+                  删除
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -747,6 +971,23 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
                   <div className="field-label" style={{ marginBottom: 8 }}>
                     LittleSkin 登录
                   </div>
+                  {remembered.length > 0 && (
+                    <div className="remember-chips">
+                      {remembered.map((r) => (
+                        <button
+                          key={r.loginName}
+                          className={`remember-chip${lsName === r.loginName ? " active" : ""}`}
+                          onClick={() => {
+                            setLsName(r.loginName);
+                            setLsPassword(r.password);
+                          }}
+                          title="点击填入已记住的账号"
+                        >
+                          {r.loginName}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                   <div className="field" style={{ marginBottom: 8 }}>
                     <input
                       className="input"
@@ -767,6 +1008,14 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
                       onKeyDown={(e) => e.key === 'Enter' && doLittleSkinLogin()}
                     />
                   </div>
+                  <label className="remember-row">
+                    <input
+                      type="checkbox"
+                      checked={lsRemember}
+                      onChange={(e) => setLsRemember(e.target.checked)}
+                    />
+                    记住密码（下次自动填入，并可直接切换角色）
+                  </label>
                   <button className="btn btn-block" onClick={doLittleSkinLogin} disabled={lsBusy}>
                     {lsBusy ? '登录中…' : '登录 LittleSkin'}
                   </button>
@@ -816,6 +1065,111 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ---- LittleSkin role switcher ---- */}
+      {roleOpen && accountId && (
+        <div className="modal-backdrop" role="presentation" onClick={() => !roleBusy && setRoleOpen(false)}>
+          <div
+            className="modal role-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="role-title"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="modal-title" id="role-title">
+              切换角色 · {selectedAccount?.name}
+            </div>
+            <p className="muted small" style={{ margin: '4px 0 12px' }}>
+              选中一个角色后点击「切换」。切换会重新验证账号，因为 Minecraft 的登录凭证只能绑定一个角色且无法改绑。
+            </p>
+
+            {rolesLoading && <div className="role-empty">正在检测角色…</div>}
+
+            {!rolesLoading && roleError && <div className="role-error">{roleError}</div>}
+
+            {!rolesLoading && !roleError && roles !== null && roles.length === 0 && (
+              <div className="role-empty">该账户下没有角色，请先到 LittleSkin 官网创建角色。</div>
+            )}
+
+            {!rolesLoading && !roleError && roles !== null && roles.length > 0 && (
+              <div className="role-list">
+                {roles.map((r) => (
+                  <label key={r.id} className={`role-row${roleChoice === r.id ? ' selected' : ''}`}>
+                    <input
+                      type="radio"
+                      name="slcl-role"
+                      value={r.id}
+                      checked={roleChoice === r.id}
+                      onChange={() => setRoleChoice(r.id)}
+                    />
+                    <span className="role-name">{r.name}</span>
+                    {r.selected && <span className="badge badge-accent">当前</span>}
+                  </label>
+                ))}
+              </div>
+            )}
+
+            {needsRelogin && !rolesLoading && (
+              <p className="role-hint">
+                目前只读取到当前角色。填写下面的账号与密码并点击「读取角色列表」，可以获取该账号下的全部角色。
+              </p>
+            )}
+
+            {hasStoredCredential && (
+              <p className="role-hint role-hint-ok">
+                已记住该账号的密码，点击「切换」即可，无需重新输入。
+              </p>
+            )}
+
+            {!hasStoredCredential && (
+            <div className="role-verify">
+              <div className="field">
+                <label className="field-label">LittleSkin 邮箱</label>
+                <input
+                  className="input"
+                  value={roleLoginName}
+                  onChange={(e) => setRoleLoginName(e.target.value)}
+                  placeholder="example@mail.com"
+                  autoComplete="username"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">密码</label>
+                <input
+                  className="input"
+                  type="password"
+                  value={rolePassword}
+                  onChange={(e) => setRolePassword(e.target.value)}
+                  placeholder="用于验证并切换角色，不会被保存"
+                  autoComplete="current-password"
+                  onKeyDown={(e) => e.key === 'Enter' && void confirmRoleSwitch()}
+                />
+              </div>
+              <button
+                className="btn btn-sm"
+                onClick={() => void detectRoles(rolePassword)}
+                disabled={rolesLoading || !rolePassword}
+                title="用邮箱和密码读取该账号下的全部角色"
+              >
+                读取角色列表
+              </button>
+            </div>
+            )}
+            <div className="dialog-actions" style={{ marginTop: 16 }}>
+              <button className="btn" onClick={() => setRoleOpen(false)} disabled={roleBusy}>
+                取消
+              </button>
+              <button
+                className="btn btn-primary"
+                onClick={() => void confirmRoleSwitch()}
+                disabled={roleBusy || rolesLoading || !roleChoice || Boolean(roleError)}
+              >
+                {roleBusy ? '切换中…' : '切换'}
+              </button>
+            </div>
           </div>
         </div>
       )}
