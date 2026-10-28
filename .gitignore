@@ -28,6 +28,13 @@ yarn-error.log*
 .DS_Store
 Thumbs.db
 
+# ---- vendor / internal integration package (see src/main/slatt for the documented API) ----
+*SLATT*对接包*/
+
 # ---- tooling scratch (not part of the project) ----
 .omo/
 .adoptium.cjs
+
+# ---- local dev shortcut (personal helper, not shipped) ----
+启动SLCL.bat
+*.bat

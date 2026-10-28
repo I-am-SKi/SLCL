@@ -32,10 +32,13 @@ Modrinth 与 CurseForge 双源资源下载与整合包安装，以及启动失�
 - **离线登录** —— 填个名字即可，适合单机
 - **Microsoft 正版登录** —— 设备码流程，登录后显示正版皮肤
 - **LittleSkin 外置登录** —— 自动注入 authlib-injector，支持第三方皮肤站
+- **LittleSkin 多角色切换** —— 同一账号下切换角色无需重新输入密码（密码经 Electron `safeStorage` 加密，Windows 下即 DPAPI）
+- **SLATT 团队账号** —— slatt.cn 单点登录，可选用团队皮肤库
 
 ### 版本管理
 
 - 安装**原版**，或叠加 **Fabric / Forge / NeoForge**（含 1.12.2 legacy Forge）
+- Fabric 版本会**自动预装 Fabric API**，省掉「缺前置启动即崩」这一步
 - **多个游戏文件夹**：自动扫描、新增、切换「当前文件夹」
 - **版本隔离**：每个版本独立的存档 / 模组 / 配置目录
 - 7 种像素风格版本图标，一眼区分原版 / Forge / Fabric / 快照 / 远古版
@@ -50,7 +53,14 @@ Modrinth 与 CurseForge 双源资源下载与整合包安装，以及启动失�
 - 按加载器 / 游戏版本过滤，分页浏览热门推荐
 - **整合包一键安装**：` .mrpack` 与 CurseForge `.zip` 都能装，自动创建对应游戏版本与加载器
 - 已安装内容支持图标预览、启用 / 停用、删除
+- 资源卡片可跳转到对应的 **MC百科** 词条
 - **CurseForge 无需 API Key**（默认走国内镜像）；想走官方接口可在设置里填 Key
+
+### 下载管理
+
+- 独立页面查看当前任务：**总进度、实时速度、文件总数 / 剩余 / 已完成、当前文件、已用时长**
+- 可在任意页面通过底部浮动下载条进入，下载在切换页面时不会中断
+- 随时**取消**（含整合包安装），并保留最近的历史记录与失败原因
 
 ### Java
 
@@ -80,6 +90,8 @@ Modrinth 与 CurseForge 双源资源下载与整合包安装，以及启动失�
 - **BMCLAPI** 镜像加速 Mojang / Forge / Fabric / NeoForge 下载
 - **MCIM** 镜像加速 Modrinth / CurseForge 元数据与文件
 - 下载带停顿检测、大文件优先、字节级进度；镜像失败自动回退官方源
+- **并发下载**：库文件与资源对象并行拉取，整合包内文件同样并发
+- 连接建立后 20 秒无数据到达即自动中断并切换下一个源，避免长时间卡在同一百分比
 
 ---
 
@@ -204,6 +216,7 @@ SLCL/
 |---|---|
 | 启动器配置 | `%APPDATA%\slcl\config.json` |
 | 皮肤缓存 | `%APPDATA%\slcl\skins\` |
+| LittleSkin 加密凭据 | `%APPDATA%\slcl\secure\`（`safeStorage` 加密，绑定当前系统账户） |
 | SLCL 安装的 Java | `%APPDATA%\slcl\java\` |
 | 默认游戏目录 | `%APPDATA%\.minecraft`（与官方启动器相同，会自动识别已有版本） |
 
