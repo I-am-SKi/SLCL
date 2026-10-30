@@ -9,6 +9,7 @@ import type {
   LoginProgress,
   MicrosoftDeviceCode,
   SkinLookupResult,
+  SkinVariant,
 } from '@shared/types';
 import { getSettings, updateSettings } from '../settings/store';
 import { forgetCredential, listRemembered, recallCredential, rememberCredential } from './credentials';
@@ -765,7 +766,8 @@ export function getLaunchUser(accountId: string): {
 const STEVE_SKIN_B64 =
   'iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAEwElEQVR4Xu1av2sUURgMqCABQQVBBK0SCdooMQQD5jSFkNgpKdIEwSZoZ6GYJohNUmlhqrSxsUlhYZM/If/TmdncrLOz3+7drcneXtyB4f36bvNm3vd2l32ZmOiD+3eudMHZqWtJyTrbn189LqVfb+xAwZ17N1LxqLsBH17MZniuDFDBXn5b6+TEkxjz640dXLSmP8r/wgDd+74VILJoC5wLA3TFNRsgHqRQv/mh7+v64vkwwO8BSoiE4KLSrzd2UNF+QwQpdnn6aobs9+s1DpraFDZ183Im5ZkFSjVBf6PX0WtEcSh9PrUjmiBIIVpX8V7yd5Foxvn10efzqR0qwifMvr03y91fn9a7v7+8S8qf79eSvkfT13OxINvs0zpNYJ/Pp3ZwQjpRXUkIhWAIp3gSY5Go6JqsM55tn0/t0ImxxCMM4iACQoGXT3ZS0agDaCMGffhNdC0aGhnUCAN8hShIyRV/+/RBQs0AJUX5yuv9QQ1B2+dTOzgRlFx5PsO/v15MX2jwaPu4NJdw6fZkJoaPPGaCXtMN8LbPp3bwrU3FuwkoIRomsKRoGqS/5fX0zfDurckM2e/zGTkWHu50lfPz8wlnZmYSenwOR0fp9lBj0Ycxv77TL5fDwUE34f5+Znt6WGX4hCicRnh8DsciVbyacNoGqNEeVhk+oSoZcNYGTB4epgY0MgPOdAscC9ct8M8Z8Gxurwvij6N8vvAjJftYkjp+cXc3Q0/PVHxv4kXxYKafQpW9uLS9tZWlxg4KChzUAB0HMdlL29sJU0E9oUxP74/iMyK9j/2RARsbJ6QBHB8UZQI9O3wchJALm5sJUdcURel9Hu8muFkZ8WJGMlZkADgoygQWGaB1iiH7CfL4UJi0c2mupHg1gRwULpDtqE/HSBeUWXEzQFc/MiC39/f/3uh4s9N6RI67zkK4Ab7CkSHa9pRODegJcQM83jMkFd9r66OON1Rtq+hKj8XIAN8GZeMURXoK66p6bBTvv3VhKj4ygKXrLASFFQnsZwAmqWKSDNAVZTb0BHl8aIDED2oAykoZ4OmtwpUeR1KQiqNwF8cYj8sYIOIR4yvrBqgRlQxYWVnpgn5zczLOqaIiM1Sgx6YGiGgVD6rgoizQLTC0AXi97XQ6GVGrq6s5oYjxWNR1i6hhmjk0gsI8RrePxiATIwM0K9wAlq6zEHzHpzgXSOFRHOpqAKnbiCVX1OP9XsMY9pcJ1/3vRrjOFi1atGjRosX4AR9Ai5h5fT44+ViajrVo0aJFixYtWtQN/5Q29OGqfELTDyEe1li4AUMfr4sBmZPlcYEbUCUD+JrLDBhrAypnwHFZ6airbujXX//I6WM6zpjcgaefEbDtbAoGEcls8DEwPOJWA9wEtpsCNwClG6Dj/QxID0vcCK83BS7QRfq49iUGlJ3xl5HQTOmZ498NnKdqoItnO+rTMdLP9/XG5wce2u/zGBmKBPtq67jGu1h99Hm7kY/FSGC/LaB0A4pEs5+lz2NkcIEoIwMic8DofM/Fq/DGZYCnv6+09kfbJNrnkXDv93mMDDxJpsAi+nE7WSY+Et44A3hcrqKG+f+CyAAV7Qaw7fMYGaL/G1CBFB7FoQ5BRfeByAiO+zyq4g8lK5z2I+oYkQAAAABJRU5ErkJggg==';
 
-export type SkinVariant = 'classic' | 'slim';
+/** Re-exported so callers can keep importing it from the auth module. */
+export type { SkinVariant };
 
 /** How long a premium (live) skin cache stays fresh before a re-fetch. */
 const LIVE_SKIN_TTL_MS = 24 * 60 * 60 * 1000;
@@ -790,6 +792,18 @@ function localSkinPath(accountId: string): string {
   return join(dir, `${safeKey(accountId)}.png`);
 }
 
+/**
+ * Arm width of the local skin.
+ *
+ * Minecraft bakes the model choice (Steve's 4px arms vs Alex's 3px) into the skin
+ * texture metadata; the PNG itself has no such field. Without persisting it the
+ * launcher had no way to tell the game which model to use, and every local skin
+ * rendered with default-width arms.
+ */
+function localSkinMetaPath(accountId: string): string {
+  return localSkinPath(accountId).replace(/\.png$/, '.json');
+}
+
 /** Premium skin downloaded from Mojang/mirrors (cached with TTL). */
 function liveSkinPaths(uuid: string): { png: string; meta: string } {
   const dir = join(getSkinsRoot(), 'live');
@@ -811,14 +825,53 @@ function readLocalSkin(accountId: string): string | null {
   return fileToDataUrl(localSkinPath(accountId));
 }
 
-function saveLocalSkin(accountId: string, pngBase64: string): void {
+/** Arm width stored alongside the local skin; defaults to classic (Steve). */
+function readLocalSkinVariant(accountId: string): SkinVariant {
+  try {
+    const raw = JSON.parse(readFileSync(localSkinMetaPath(accountId), 'utf8')) as {
+      variant?: string;
+    };
+    return raw.variant === 'slim' ? 'slim' : 'classic';
+  } catch {
+    return 'classic';
+  }
+}
+
+function saveLocalSkin(accountId: string, pngBase64: string, variant: SkinVariant = 'classic'): void {
   writeFileSync(localSkinPath(accountId), Buffer.from(pngBase64, 'base64'));
+  writeFileSync(localSkinMetaPath(accountId), JSON.stringify({ variant }), 'utf8');
   skinMemo.delete(accountId);
 }
 
 function clearLocalSkin(accountId: string): void {
   rmSync(localSkinPath(accountId), { force: true });
+  rmSync(localSkinMetaPath(accountId), { force: true });
   skinMemo.delete(accountId);
+}
+
+/** Arm width of this account's local skin (`classic` when nothing is stored). */
+export function getSkinVariant(accountId: string): SkinVariant {
+  return readLocalSkinVariant(accountId);
+}
+
+/**
+ * The local skin PNG plus its arm width, ready to be served to the game.
+ *
+ * Returns null when the account has no local skin, so the launcher can skip the
+ * whole skin-server path.
+ */
+export function getLocalSkinForLaunch(
+  accountId: string,
+): { png: Buffer; variant: SkinVariant } | null {
+  const path = localSkinPath(accountId);
+  if (!existsSync(path)) return null;
+  try {
+    const png = readFileSync(path);
+    if (png.length === 0) return null;
+    return { png, variant: readLocalSkinVariant(accountId) };
+  } catch {
+    return null;
+  }
 }
 
 /** Read a cached premium skin. When `checkTtl`, stale entries are treated as missing. */
@@ -1007,9 +1060,19 @@ export async function getSkin(accountId: string, force = false): Promise<string>
   return steve;
 }
 
-/** Save a user-picked PNG as the account's local skin (preview only for offline accounts). */
-export function setLocalSkin(accountId: string, pngBase64: string): void {
-  saveLocalSkin(accountId, pngBase64);
+/**
+ * Save a user-picked PNG as the account's local skin.
+ *
+ * For offline accounts this is not merely a launcher preview: the launcher serves
+ * it to the game through a loopback Yggdrasil server, so an unsupported size would
+ * be silently ignored by the client and the player would still see Steve. Rejecting
+ * here keeps every write path honest — this is the single choke point for local
+ * skins, so the UI cannot bypass it.
+ */
+export function setLocalSkin(accountId: string, pngBase64: string, variant?: SkinVariant): void {
+  const buf = Buffer.from(pngBase64, 'base64');
+  assertUploadableSkin(buf);
+  saveLocalSkin(accountId, pngBase64, variant);
 }
 
 /** Look up a premium account's skin by username (Mojang public APIs, no auth needed). */
@@ -1049,7 +1112,9 @@ export async function applySkinFromUsername(accountId: string, username: string)
   const result = await lookupSkinByUsername(username);
   const b64 = result.skin.split(',')[1] ?? '';
   if (!b64) throw new Error('获取皮肤数据失败');
-  saveLocalSkin(accountId, b64);
+  // Carry the arm width over too: a slim premium skin rendered with classic arms
+  // looks visibly wrong, and the game cannot infer it from the PNG.
+  saveLocalSkin(accountId, b64, result.slim ? 'slim' : 'classic');
   return result;
 }
 
@@ -1084,14 +1149,28 @@ export function isUploadableSkinSize(buf: Buffer): boolean {
   return d.width === 64 && (d.height === 64 || d.height === 32);
 }
 
-/** Throwing variant of `isUploadableSkinSize`, with a user-facing message. */
-export function assertUploadableSkin(buf: Buffer): void {
+/**
+ * Explanation for a skin the client cannot render, or null when the size is fine.
+ *
+ * The same restriction covers both paths: a Microsoft upload is rejected by the
+ * API, and an offline account's skin is served straight to the client, which then
+ * fails to map the texture grid and falls back to Steve. Saying "can't upload"
+ * would undersell it, so the message covers both.
+ */
+export function skinSizeProblem(buf: Buffer): string | null {
   const d = pngDimensions(buf);
-  if (!d) throw new Error('皮肤文件不是有效的 PNG');
-  if (d.width === 64 && (d.height === 64 || d.height === 32)) return;
-  throw new Error(
-    `Minecraft 官方只接受 64×64 或 64×32 的皮肤，这款是 ${d.width}×${d.height}，无法上传到正版账号`,
+  if (!d) return '皮肤文件不是有效的 PNG';
+  if (d.width === 64 && (d.height === 64 || d.height === 32)) return null;
+  return (
+    `Minecraft 客户端只接受 64×64 或 64×32 的皮肤，这款是 ${d.width}×${d.height}，` +
+    `无法上传到正版账号，也无法用于离线启动。`
   );
+}
+
+/** Throwing variant of `skinSizeProblem`, with a user-facing message. */
+export function assertUploadableSkin(buf: Buffer): void {
+  const problem = skinSizeProblem(buf);
+  if (problem) throw new Error(problem);
 }
 
 /**
@@ -1119,7 +1198,7 @@ export async function uploadSkin(accountId: string, variant: SkinVariant, pngBas
     throw new Error(`更换皮肤失败 (${res.status}): ${text.slice(0, 200)}`);
   }
   // Cache locally so it shows even after the token expires.
-  saveLocalSkin(accountId, pngBase64);
+  saveLocalSkin(accountId, pngBase64, variant);
 }
 
 /** Reset an account's skin to the default (clears local cache; for Microsoft also resets on Mojang). */

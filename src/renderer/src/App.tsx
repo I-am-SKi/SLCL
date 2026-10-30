@@ -44,6 +44,9 @@ export default function App(): JSX.Element {
     theme: 'emerald',
     backgroundImage: '',
     backgroundOpacity: 0.35,
+    titlebarMode: 'default',
+    titlebarText: '',
+    titlebarIcon: true,
   }));
 
   // Single global progress subscription — lives here so it never unmounts on navigation.
@@ -77,22 +80,55 @@ export default function App(): JSX.Element {
 
   const hasBackground = appearance.backgroundImage !== '';
 
+  /**
+   * Title bar label and logo are controlled separately.
+   *
+   * `titlebarLabel` is `null` when the user chose a custom title and left it
+   * blank — no text, not a fallback to "SLCL". The logo has its own switch, so the
+   * brand block is rendered whenever *either* is on; only when both are off does
+   * the strip become empty (just the window buttons).
+   */
+  const titlebarLabel =
+    appearance.titlebarMode === 'custom'
+      ? appearance.titlebarText.trim() || null
+      : 'SLCL';
+  const showTitlebarIcon = appearance.titlebarIcon;
+  const showBrand = showTitlebarIcon || titlebarLabel !== null;
+
   return (
     <div className="app-root">
       {/* Custom title bar (the native one is disabled in the main process). */}
       <header className="titlebar">
-        <div className="titlebar-brand">
-          <span
-            className="titlebar-logo"
-            aria-hidden="true"
-            style={{
-              // Resolved against the document, so it works in dev and packaged builds.
-              WebkitMaskImage: 'url(mark.png)',
-              maskImage: 'url(mark.png)',
-            }}
-          />
-          <span className="titlebar-title">SLCL</span>
-        </div>
+        {showBrand && (
+          <div className="titlebar-brand">
+            {/*
+              The logo lives inside a collapsing slot rather than being mounted and
+              unmounted: a width/margin/opacity transition is what makes hiding it
+              read as a deliberate animation instead of a jump. The slot also owns
+              the gap to the title, so the space closes along with the icon.
+            */}
+            <span
+              className={`titlebar-logo-slot${showTitlebarIcon ? '' : ' is-hidden'}`}
+              aria-hidden="true"
+            >
+              <span
+                className="titlebar-logo"
+                style={{
+                  // Resolved against the document, so it works in dev and packaged builds.
+                  WebkitMaskImage: 'url(mark.png)',
+                  maskImage: 'url(mark.png)',
+                }}
+              />
+            </span>
+            {titlebarLabel !== null && (
+              /* Inherits `--titlebar-text`, so it flips with the light/dark palette
+                 and picks up each theme's title bar colour automatically. */
+              <span className="titlebar-title" title={titlebarLabel}>
+                {titlebarLabel}
+              </span>
+            )}
+          </div>
+        )}
 
         <div className="titlebar-controls">
           <button

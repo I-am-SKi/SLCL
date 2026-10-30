@@ -5,7 +5,9 @@ import type {
   ModLoader,
   RemoteMinecraftVersion,
   ResourceFileInfo,
+  ResourceDependency,
   ResourceInstallTarget,
+  ResolvedDependency,
   ResourceProject,
   ResourceSource,
   ResourceType,
@@ -53,10 +55,368 @@ const VERSION_LOADER_OPTIONS: Array<{ value: ModLoader | ''; label: string }> = 
 const REC_PAGE_SIZE = 20;
 
 /** 1.2k / 3.4M — download counter formatting (not bytes). */
+/**
+ * Dependencies ("前置模组") of the picked version.
+ *
+ * Renders nothing when the version declares none, so mods without dependencies
+ * see no extra UI at all. When something is missing this is the loudest element
+ * in the dialog on purpose: a mod with an unmet prerequisite simply will not load,
+ * and the crash it produces gives no hint about what is missing.
+ */
+function DependencyPanel({
+  dependencies,
+  loading,
+  error,
+  missing,
+  autoInstall,
+  onToggleAutoInstall,
+  onInstall,
+  onOpenProject,
+  installing,
+  versionChoice,
+  onChooseVersion,
+}: {
+  dependencies: ResolvedDependency[] | null;
+  loading: boolean;
+  error: string;
+  missing: ResolvedDependency[];
+  autoInstall: boolean;
+  onToggleAutoInstall: (next: boolean) => void;
+  onInstall: (dep: ResolvedDependency) => void;
+  onOpenProject: (dep: ResolvedDependency) => void;
+  installing: boolean;
+  /** projectId -> version id chosen by the user (overrides the default). */
+  versionChoice: Record<string, string>;
+  onChooseVersion: (projectId: string, versionId: string) => void;
+}): JSX.Element | null {
+  const declared = dependencies ?? [];
+  if (!loading && !error && declared.length === 0) return null;
+
+  const hasMissing = missing.length > 0;
+
+  return (
+    <div className={`dep-panel${hasMissing ? ' has-required' : ''}`} style={{ marginBottom: 12 }}>
+      <div className="dep-panel-head">
+        <span className="dep-panel-title">
+          {hasMissing ? '缺少前置模组' : '前置模组'}
+        </span>
+        <span className="badge dep-count-badge">{declared.length} 个</span>
+      </div>
+
+      {loading && <p className="muted small" style={{ margin: '6px 0 0' }}>正在查询前置模组…</p>}
+
+      {error && (
+        <p className="small" style={{ margin: '6px 0 0', color: 'var(--danger)' }}>
+          查询前置失败：{error}
+        </p>
+      )}
+
+      {!loading && declared.length > 0 && (
+        <ul className="dep-list">
+          {declared.map((dep) => (
+            <DependencyRow
+              key={dep.projectId}
+              dep={dep}
+              depth={0}
+              installing={installing}
+              onInstall={onInstall}
+              onOpenProject={onOpenProject}
+              versionChoice={versionChoice}
+              onChooseVersion={onChooseVersion}
+            />
+          ))}
+        </ul>
+      )}
+
+      {hasMissing && (
+        <p className="dep-panel-hint">
+          缺少前置时游戏会直接闪退或提示缺少模组，请务必安装。
+        </p>
+      )}
+
+      {hasMissing && (
+        <label className="dep-auto-row">
+          <input
+            type="checkbox"
+            checked={autoInstall}
+            onChange={(e) => onToggleAutoInstall(e.target.checked)}
+          />
+          安装模组时一并安装这 {missing.length} 个前置
+        </label>
+      )}
+    </div>
+  );
+}
+
+/** `6.0.8.1+build.1744-mc1.20.1 · 2026/01/25` — version + publish date, as asked. */
+function dependencyVersionLabel(v: ResourceVersion): string {
+  const date = formatDate(v.datePublished);
+  return date ? `${v.versionNumber} · ${date}` : v.versionNumber;
+}
+
+/** One dependency, plus its own dependencies indented underneath. */
+function DependencyRow({
+  dep,
+  depth,
+  installing,
+  onInstall,
+  onOpenProject,
+  versionChoice,
+  onChooseVersion,
+}: {
+  dep: ResolvedDependency;
+  depth: number;
+  installing: boolean;
+  onInstall: (dep: ResolvedDependency) => void;
+  onOpenProject: (dep: ResolvedDependency) => void;
+  versionChoice: Record<string, string>;
+  onChooseVersion: (projectId: string, versionId: string) => void;
+}): JSX.Element {
+  // Only required dependencies reach this component (the resolver drops optional
+  // ones), so there is no distinction to render any more.
+  // A user override wins over the resolver's default.
+  const chosen =
+    dep.candidates.find((c) => c.id === versionChoice[dep.projectId]) ?? dep.version;
+  /**
+   * Three states, not two:
+   *   exact   — the version shown is the one on disk
+   *   replace — a different build of the same mod is on disk; installing swaps it
+   *   none    — nothing installed
+   *
+   * The middle case is why the button used to reappear on an installed mod: the old
+   * check compared file names only, so picking another version looked uninstalled.
+   */
+  const installedOnDisk = dep.installedFile;
+  /**
+   * "Same" is decided by the filename the resolver saw in *this dialog's* target
+   * folder. The page-level `installed` list describes whichever version the page
+   * has selected, which is not necessarily where this install will go — trusting it
+   * showed "替换" even when the version on disk was the one already selected.
+   */
+  const isSameInstalled = Boolean(installedOnDisk && chosen && installedOnDisk.filename === chosen.filename);
+  const isReplace =
+    !isSameInstalled && Boolean(installedOnDisk) && Boolean(chosen);
+  /** Only offer a dropdown when there is a real choice to make. */
+  const canPick = dep.candidates.length > 1;
+  const versionLabel = chosen
+    ? `${chosen.versionNumber} · ${formatBytes(chosen.fileSize)}`
+    : (dep.problem ?? '未找到可用文件');
+
+  return (
+    <>
+      <li
+        className={`dep-row${isSameInstalled ? ' installed' : ''}`}
+        // 10px is the row's own padding (see .dep-row); the indent for nested
+        // dependencies stacks on top of it. Setting only `depth * 18` here would
+        // override that padding and leave the text touching the left bar.
+        style={{ paddingLeft: 10 + depth * 18 }}
+        title="前置模组：缺少它模组将无法加载"
+      >
+        <div className="dep-main">
+          <div className="dep-name" title={dep.title}>
+            {dep.title}
+          </div>
+          {installedOnDisk && (
+            <div className="dep-installed-note">
+              已安装 {installedOnDisk.version || installedOnDisk.filename}
+              {isReplace ? ' · 将替换为下方所选版本' : ''}
+            </div>
+          )}
+          {canPick ? (
+            // Dropdown replaces the plain text only when there is more than one
+            // version, so the common single-candidate case stays visually quiet.
+            <div className="dep-version-pick">
+              <Select
+                className="select-sm dep-version-select"
+                value={chosen?.id ?? ''}
+                onChange={(id) => onChooseVersion(dep.projectId, id)}
+                options={dep.candidates.map((c) => ({
+                  value: c.id,
+                  label: dependencyVersionLabel(c),
+                }))}
+                title={chosen ? `${versionLabel} · ${dependencyVersionLabel(chosen)}` : undefined}
+              />
+            </div>
+          ) : (
+            <div className={`dep-sub${chosen ? '' : ' missing'}`} title={versionLabel}>
+              {versionLabel}
+            </div>
+          )}
+        </div>
+        {isSameInstalled ? (
+          <span className="dep-state">已安装</span>
+        ) : chosen ? (
+          <button
+            className="btn btn-sm btn-primary"
+            onClick={() => onInstall(dep)}
+            disabled={installing}
+            title={isReplace ? `将删除已安装的 ${installedOnDisk?.filename ?? ''}` : undefined}
+          >
+            {isReplace ? '替换' : '安装'}
+          </button>
+        ) : (
+          <button className="btn btn-sm" onClick={() => onOpenProject(dep)}>
+            查看
+          </button>
+        )}
+      </li>
+      {dep.children.map((child) => (
+        <DependencyRow
+          key={child.projectId}
+          dep={child}
+          depth={depth + 1}
+          installing={installing}
+          onInstall={onInstall}
+          onOpenProject={onOpenProject}
+          versionChoice={versionChoice}
+          onChooseVersion={onChooseVersion}
+        />
+      ))}
+    </>
+  );
+}
+
+/**
+ * Number of dependencies the panel will actually list for a version.
+ *
+ * Mirrors the resolver's filter (required only, minus loader-bundled projects) so
+ * the badge on the card and the rows in the panel always agree. Keep this in sync
+ * with `AUTO_INSTALLED_PROJECTS` in `main/resources/index.ts`.
+ */
+const AUTO_INSTALLED_PROJECT_IDS = new Set(['P7dR8mSH', '306612']);
+function countShownDependencies(deps: ResourceDependency[] | undefined): number {
+  return (deps ?? []).filter(
+    (d) => d.kind === 'required' && !AUTO_INSTALLED_PROJECT_IDS.has(d.projectId),
+  ).length;
+}
+
+/** Flip `installed` on the resolved tree after a successful install. */
+function markInstalled(list: ResolvedDependency[], projectId: string): ResolvedDependency[] {
+  return list.map((dep) => ({
+    ...dep,
+    installed: dep.installed || dep.projectId === projectId,
+    children: markInstalled(dep.children, projectId),
+  }));
+}
+
 function formatCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
   return String(n);
+}
+
+interface ResourceCardProps {
+  p: ResourceProject;
+  rank?: number;
+  /**
+   * Name to show — the Chinese name when one is known, else the English title.
+   * Computed by the caller because the name arrives asynchronously.
+   */
+  zh: string;
+  installing: boolean;
+  /**
+   * Whether to offer the MC百科 link. Only mods have `class/` entries there;
+   * searching a modpack / resource pack / shader / datapack name returns unrelated
+   * mods, so the link would be a dead end for every other category.
+   */
+  showMcmod: boolean;
+  onInstall: (p: ResourceProject) => void;
+  onOpenPage: (p: ResourceProject, site: ResourceSource) => void;
+  onOpenMcmod: (title: string) => void;
+}
+
+/**
+ * One resource card.
+ *
+ * Deliberately declared at module scope: a component defined inside `Resources`
+ * gets a fresh function identity on every render, which makes React treat it as a
+ * new component type and remount every card — re-running `<img>` loads and
+ * flickering the list. That was tolerable when the page only re-rendered on user
+ * actions, but Chinese names now stream in one at a time (~20 updates per page),
+ * so remounting would repaint the whole grid twenty times.
+ */
+function ResourceCard({
+  p,
+  rank,
+  zh,
+  installing,
+  showMcmod,
+  onInstall,
+  onOpenPage,
+  onOpenMcmod,
+}: ResourceCardProps): JSX.Element {
+  const onModrinth = p.source === 'modrinth';
+  const hasZh = zh !== p.title;
+  return (
+    <div className="card resource-card">
+      <div className="resource-head">
+        {p.iconUrl ? (
+          <img className="resource-icon" src={p.iconUrl} alt={zh} loading="lazy" />
+        ) : (
+          <div className="resource-placeholder">{zh.charAt(0).toUpperCase()}</div>
+        )}
+        <div className="resource-meta">
+          <div className="resource-title" title={hasZh ? `${zh} · ${p.title}` : p.title}>
+            {rank !== undefined && <span className="rank-badge">{rank}</span>}
+            {zh}
+            {/* The English title stays visible as a gloss, since that is what the
+                upstream sites and other players use. */}
+            {hasZh && <span className="resource-title-en">{p.title}</span>}
+          </div>
+          <div className="resource-sub">
+            {p.author ? p.author : '未知作者'} · {formatCount(p.downloads)} 次下载
+            <span className={`badge source-badge ${onModrinth ? '' : 'badge-blue'}`}>
+              {onModrinth ? 'Modrinth' : 'CurseForge'}
+            </span>
+          </div>
+        </div>
+      </div>
+      {/* Description and chips always render so every card reserves the same
+          vertical space — without this the install buttons drift out of line
+          whenever a card has a shorter description or no tags. */}
+      <div className="resource-desc">{p.description ?? ''}</div>
+      <div className="chip-row">
+        {p.categories.slice(0, 3).map((c) => (
+          <span key={c} className="chip" title={c}>
+            {tagLabel(c)}
+          </span>
+        ))}
+      </div>
+      <div className="source-links">
+        <button
+          className="link-btn"
+          onClick={() => onOpenPage(p, 'modrinth')}
+          title={onModrinth ? '在 Modrinth 打开原页面' : '按名称在 Modrinth 查找该资源'}
+        >
+          Modrinth
+        </button>
+        <span className="muted small">·</span>
+        <button
+          className="link-btn"
+          onClick={() => onOpenPage(p, 'curseforge')}
+          title={!onModrinth ? '在 CurseForge 打开原页面' : '按名称在 CurseForge 查找该资源'}
+        >
+          CurseForge
+        </button>
+        {/* MC百科 only indexes mods — see ResourceCardProps.showMcmod. */}
+        {showMcmod && (
+          <>
+            <span className="muted small">·</span>
+            <button
+              className="link-btn"
+              onClick={() => onOpenMcmod(zh)}
+              title="在 MC百科 查找该模组（有对应条目时直接打开）"
+            >
+              MC百科
+            </button>
+          </>
+        )}
+      </div>
+      <button className="btn btn-primary btn-block" onClick={() => onInstall(p)} disabled={installing}>
+        安装
+      </button>
+    </div>
+  );
 }
 
 /** Compare Minecraft version strings, newest first. */
@@ -76,6 +436,30 @@ function compareVersionsDesc(a: string, b: string): number {
     if (na !== nb) return nb - na;
   }
   return 0;
+}
+
+/**
+ * Whether a token is a Minecraft version rather than a loader/platform tag.
+ *
+ * CurseForge's file metadata mixes both: a JEI release reports
+ * `["Client","NeoForge","Server","26.1","26.1.1"]`. Listing "Client" in the
+ * 游戏版本 filter (or on a version card) is nonsense, and picking it returns
+ * nothing. Modrinth only ever reports real versions, so this is a no-op there.
+ */
+function isMinecraftVersion(value: string): boolean {
+  return (
+    // 1.20 / 1.20.1 / 26.1
+    /^\d+(\.\d+)+$/.test(value) ||
+    // 24w14a snapshot
+    /^\d{2}w\d{2}[a-z]$/i.test(value) ||
+    // 1.21.5-pre1 / 1.21.5-rc1
+    /^\d+(\.\d+)+-(pre|rc)\d+$/i.test(value)
+  );
+}
+
+/** Strip loader/platform tags from a game-version list. */
+function minecraftVersionsOnly(list: readonly string[] | undefined): string[] {
+  return (list ?? []).filter(isMinecraftVersion);
 }
 
 function formatDate(iso: string): string {
@@ -115,6 +499,12 @@ export default function Resources({
   const [searching, setSearching] = useState(false);
   const [searched, setSearched] = useState(false);
   const [results, setResults] = useState<ResourceProject[]>([]);
+  /**
+   * Set when a Chinese keyword was translated to an English project name, so the
+   * results header can show "已译为 Create" instead of leaving the user guessing
+   * why the cards are in English.
+   */
+  const [translatedQuery, setTranslatedQuery] = useState('');
   const [loaderFilter, setLoaderFilter] = useState('');
   const [gameVersionFilter, setGameVersionFilter] = useState('');
   /** Which site to browse. Both work without a CurseForge key (mirror fallback). */
@@ -132,9 +522,39 @@ export default function Resources({
   const [recHasNext, setRecHasNext] = useState(false);
   const recsRef = useRef<HTMLDivElement>(null);
 
+  /**
+   * English project title -> Chinese name, filled in for every card (not just the
+   * ones a Chinese search found). Populated from the main process cache
+   * immediately and then progressively as background lookups finish.
+   */
+  const [zhNames, setZhNames] = useState<Record<string, string>>({});
+
+  /**
+   * MC百科 only indexes mods, so Chinese names are only meaningful for the mod tab.
+   * Elsewhere the map is ignored — otherwise a shader that happens to share a name
+   * with a mod would inherit that mod's Chinese name, and every non-mod card would
+   * queue a lookup that can never succeed.
+   */
+  const useZhNames = type === 'mod';
+
+  /** Chinese name for a project, falling back to its English title. */
+  const zhOf = (p: ResourceProject): string =>
+    useZhNames ? (p.titleZh ?? zhNames[p.title] ?? p.title) : p.title;
+
   // install dialog
   const [project, setProject] = useState<ResourceProject | null>(null);
   const [dialogVersions, setDialogVersions] = useState<ResourceVersion[]>([]);
+  /**
+   * Minecraft versions and mod loaders the open project actually ships files for,
+   * from the upstream project document.
+   *
+   * Both filters in the install dialog are built from this rather than from the
+   * full Minecraft version list / every known loader: offering unsupported values
+   * let the user pick one and end up with "没有匹配的版本" and no obvious way back.
+   */
+  const [dialogSupport, setDialogSupport] = useState<{ gameVersions: string[]; loaders: string[] }>(
+    { gameVersions: [], loaders: [] },
+  );
   const [dialogLoading, setDialogLoading] = useState(false);
   const [dialogGameVersion, setDialogGameVersion] = useState('');
   const [dialogLoader, setDialogLoader] = useState('');
@@ -149,8 +569,36 @@ export default function Resources({
 
   const [installing, setInstalling] = useState(false);
   const [packName, setPackName] = useState('');
-  /** Modrinth version id selected for modpack installation (history picker). */
+  /**
+   * Version picked in the dialog. Used by every resource type now: the picker
+   * became select-then-act so a dependency panel can sit under it.
+   */
   const [packVersionId, setPackVersionId] = useState('');
+  /**
+   * Resolved dependencies of the picked version, or null while loading.
+   *
+   * Only the picked version is resolved (not all of them): resolution costs one
+   * request per dependency, and the dialog can show dozens of versions.
+   */
+  const [dependencies, setDependencies] = useState<ResolvedDependency[] | null>(null);
+  const [dependencyError, setDependencyError] = useState('');
+  /** Auto-install the required dependencies together with the mod (on by default). */
+  const [autoInstallDeps, setAutoInstallDeps] = useState(true);
+  /**
+   * projectId -> version id the user picked for that dependency.
+   *
+   * Kept here rather than mutated into `dependencies` so re-resolving (which
+   * happens whenever the picked mod version changes) cannot wipe the choice of a
+   * dependency the user is still looking at.
+   */
+  const [depVersionChoice, setDepVersionChoice] = useState<Record<string, string>>({});
+
+  /** The version that will actually be installed for a dependency. */
+  const depVersionOf = useCallback(
+    (dep: ResolvedDependency): ResourceVersion | null =>
+      dep.candidates.find((c) => c.id === depVersionChoice[dep.projectId]) ?? dep.version,
+    [depVersionChoice],
+  );
 
   const tab = useMemo(() => TABS.find((t) => t.key === tabKey) ?? TABS[1], [tabKey]);
 
@@ -244,6 +692,47 @@ export default function Resources({
     void refreshInstalled();
   }, [refreshInstalled]);
 
+  // ---- Chinese names for every card ----
+  //
+  // Names resolved in the background arrive one at a time (mcmod allows ~1 req/s),
+  // so they are merged into a map instead of rewriting the result lists.
+  useEffect(() => {
+    return window.slcl.resources.onZhName(({ title, zh }) => {
+      setZhNames((prev) => (prev[title] === zh ? prev : { ...prev, [title]: zh }));
+    });
+  }, []);
+
+  // Ask for whatever is already cached, then queue the rest. Runs whenever the
+  // visible set changes (new search, new page of recommendations, tab switch).
+  // Mods only: MC百科 has no entries for the other categories, so querying for them
+  // would spend a request per card (1/s) to always come back empty.
+  useEffect(() => {
+    if (!useZhNames) return;
+    const titles = [...results, ...recs].map((p) => p.title);
+    if (titles.length === 0) return;
+    let cancelled = false;
+    void window.slcl.resources
+      .zhNames(titles)
+      .then((known) => {
+        if (cancelled || Object.keys(known).length === 0) return;
+        setZhNames((prev) => {
+          let changed = false;
+          const next = { ...prev };
+          for (const [title, zh] of Object.entries(known)) {
+            if (next[title] !== zh) {
+              next[title] = zh;
+              changed = true;
+            }
+          }
+          return changed ? next : prev;
+        });
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [useZhNames, results, recs]);
+
   // Popularity recommendations for the active tab (independent of the search filters,
   // so every category always has content to discover). Paged 20 at a time.
   useEffect(() => {
@@ -259,15 +748,15 @@ export default function Resources({
     setRecHasNext(false);
     (async () => {
       try {
-        const list = await window.slcl.resources.search(type, '', {
+        const { items } = await window.slcl.resources.search(type, '', {
           source,
           sortBy: 'downloads',
           limit: REC_PAGE_SIZE,
           offset: (recPage - 1) * REC_PAGE_SIZE,
         });
         if (cancelled) return;
-        setRecs(list);
-        setRecHasNext(list.length === REC_PAGE_SIZE);
+        setRecs(items);
+        setRecHasNext(items.length === REC_PAGE_SIZE);
       } catch (e) {
         if (!cancelled) {
           setRecs([]);
@@ -296,14 +785,16 @@ export default function Resources({
     setSearching(true);
     setSearched(true);
     try {
-      const list = await window.slcl.resources.search(type, query.trim(), {
+      const { items, translatedQuery } = await window.slcl.resources.search(type, query.trim(), {
         source,
         gameVersion: gameVersionFilter || undefined,
         loader: tab.hasLoader && loaderFilter ? loaderFilter : undefined,
       });
-      setResults(list);
+      setResults(items);
+      setTranslatedQuery(translatedQuery ?? '');
     } catch (e) {
       setResults([]);
+      setTranslatedQuery('');
       notify(e instanceof Error ? e.message : String(e), 'error');
     } finally {
       setSearching(false);
@@ -315,6 +806,7 @@ export default function Resources({
     setResults([]);
     setSearched(false);
     setQuery('');
+    setTranslatedQuery('');
     setLoaderFilter('');
     setProject(null);
     setRecPage(1);
@@ -324,6 +816,7 @@ export default function Resources({
     setSource(next);
     setResults([]);
     setSearched(false);
+    setTranslatedQuery('');
     setProject(null);
     setRecPage(1);
   }
@@ -469,10 +962,14 @@ export default function Resources({
     const v = versions.find((x) => x.id === targetVid);
     if (!v) return;
 
-    const nextGame = v.minecraftVersion || dialogGameVersion;
-    // Only mods/resources expose a loader filter; vanilla versions have no loader.
+    // Only switch the game filter when the resource actually ships files for that
+    // version — otherwise the dropdown would hold a value it does not offer, and
+    // the list below would be empty with no way back except resetting by hand.
+    const targetGame = v.minecraftVersion;
+    const nextGame = targetGame && dialogSupportsGameVersion(targetGame) ? targetGame : '';
+    // Same guard for the loader; vanilla versions have no loader at all.
     const nextLoader =
-      tab.hasLoader && v.loader && LOADERS.includes(v.loader) ? v.loader : tab.hasLoader ? '' : '';
+      tab.hasLoader && v.loader && dialogSupportsLoader(v.loader) ? v.loader : '';
 
     const gameChanged = nextGame !== dialogGameVersion;
     const loaderChanged = nextLoader !== dialogLoader;
@@ -489,21 +986,54 @@ export default function Resources({
     // Page-level filters win; otherwise derive them from the version being installed
     // into, so the list opens on compatible files instead of everything.
     const targetVersion = versions.find((v) => v.id === initialTarget);
-    const initialGame = gameVersionFilter || targetVersion?.minecraftVersion || '';
-    const initialLoader = tab.hasLoader
-      ? loaderFilter ||
-        (targetVersion?.loader && LOADERS.includes(targetVersion.loader) ? targetVersion.loader : '')
-      : '';
-    setDialogGameVersion(initialGame);
-    setDialogLoader(initialLoader);
+    const preferredGame = gameVersionFilter || targetVersion?.minecraftVersion || '';
+    const preferredLoader =
+      loaderFilter ||
+      (targetVersion?.loader && LOADERS.includes(targetVersion.loader) ? targetVersion.loader : '');
+    setDialogLoader('');
     setDialogVersions([]);
+    setDialogSupport({ gameVersions: [], loaders: [] });
+    setDialogGameVersion('');
     setPackVersionId('');
     setTargetMode('auto');
     setTargetVersionId(initialTarget);
     setCustomDir('');
     setWorldFolder('');
-    setPackName(p.title);
+    // Default modpack version name: the Chinese name when one is known, since that
+    // is the name the player recognises in the version list.
+    setPackName(zhOf(p));
     setDialogTargetPath('');
+
+    // Both dropdowns may only offer what this resource supports, so the project's
+    // own support matrix is fetched before either default is chosen.
+    setDialogLoading(true);
+    let support = { gameVersions: [] as string[], loaders: [] as string[] };
+    try {
+      const raw = await window.slcl.resources.support(p.id, p.source);
+      support = {
+        gameVersions: minecraftVersionsOnly(raw.gameVersions).sort(compareVersionsDesc),
+        loaders: raw.loaders.filter((l) => LOADERS.includes(l)),
+      };
+    } catch {
+      // Best effort: without the matrix both dropdowns collapse to "全部", which is
+      // exactly what the old behaviour degraded to anyway.
+    }
+    setDialogSupport(support);
+
+    // Default to the version being installed into — but only when the resource
+    // supports it. Otherwise fall back to 全部版本, so the list is never empty just
+    // because the player runs a Minecraft version this resource never supported.
+    const initialGame =
+      preferredGame && support.gameVersions.includes(preferredGame) ? preferredGame : '';
+    // Same rule for the loader: a Forge-only mod opened from a Fabric page must not
+    // inherit the Fabric filter and show nothing.
+    const initialLoader =
+      tab.hasLoader && preferredLoader && support.loaders.includes(preferredLoader)
+        ? preferredLoader
+        : '';
+    setDialogGameVersion(initialGame);
+    setDialogLoader(initialLoader);
+
     await loadDialogVersions(p, initialGame, initialLoader);
   }
 
@@ -573,8 +1103,47 @@ export default function Resources({
     }
   }
 
-  async function installVersionFile(v: ResourceVersion): Promise<void> {
+  /**
+   * Install the dependency file `dep` resolves to, into the same target folder.
+   *
+   * Uses the normal single-file install path, so a dependency obeys exactly the
+   * same mirror/fallback/rename rules as the mod the user actually clicked.
+   */
+  async function installDependency(dep: ResolvedDependency): Promise<void> {
+    const version = depVersionOf(dep);
+    if (!project || !version) return;
+    setInstalling(true);
+    try {
+      const r = await window.slcl.resources.install(
+        type,
+        dep.projectId,
+        version.id,
+        dialogTarget,
+        project.source,
+      );
+      notify(`已安装前置 ${dep.title} ${r.versionNumber}`, 'success');
+      // Reflect "已安装" without a full re-resolve.
+      setDependencies((prev) => (prev ? markInstalled(prev, dep.projectId) : prev));
+      await refreshInstalled();
+    } catch (e) {
+      notify(`前置 ${dep.title} 安装失败：${e instanceof Error ? e.message : String(e)}`, 'error');
+    } finally {
+      setInstalling(false);
+    }
+  }
+
+  /**
+   * Install the picked file, plus — by default — every missing required
+   * dependency. Optional ones are installed only when the user asked for them via
+   * the checklist, which is why they are not part of this list.
+   */
+  async function installPickedVersion(): Promise<void> {
     if (!project) return;
+    const v = pickedVersion;
+    if (!v) {
+      notify('请先选择一个版本', 'error');
+      return;
+    }
     if (targetMode === 'manual' && !customDir) {
       notify('请先选择安装文件夹', 'error');
       return;
@@ -583,10 +1152,38 @@ export default function Resources({
       notify('请先选择游戏版本', 'error');
       return;
     }
+
     setInstalling(true);
     try {
+      // Dependencies first: if one of them fails, the mod would not run anyway, and
+      // failing early avoids leaving a mod with unmet requirements behind.
+      const toInstall = autoInstallDeps ? missingDependencies : [];
+      const installedDepLabels: string[] = [];
+      for (const dep of toInstall) {
+        const version = depVersionOf(dep);
+        if (!version) continue;
+        try {
+          const r = await window.slcl.resources.install(
+            type,
+            dep.projectId,
+            version.id,
+            dialogTarget,
+            project.source,
+          );
+          installedDepLabels.push(`${dep.title} ${r.versionNumber}`);
+        } catch (e) {
+          notify(
+            `前置 ${dep.title} 安装失败：${e instanceof Error ? e.message : String(e)}。` +
+              '模组仍会安装，但可能无法启动。',
+            'error',
+          );
+        }
+      }
+
       const r = await window.slcl.resources.install(type, project.id, v.id, dialogTarget, project.source);
-      notify(`已安装 ${r.title} ${r.versionNumber}`, 'success');
+      const depsNote =
+        installedDepLabels.length > 0 ? `，并安装了 ${installedDepLabels.length} 个前置` : '';
+      notify(`已安装 ${r.title} ${r.versionNumber}${depsNote}`, 'success');
       setProject(null);
       await refreshInstalled();
     } catch (e) {
@@ -594,6 +1191,13 @@ export default function Resources({
     } finally {
       setInstalling(false);
     }
+  }
+
+  /** Open a dependency's page on its own site. */
+  function openDependencyPage(dep: ResolvedDependency): void {
+    const site = project?.source ?? 'modrinth';
+    const path = site === 'curseforge' ? 'mc-mods' : type === 'mod' ? 'mod' : type;
+    void window.slcl.openExternal(`https://${site === 'curseforge' ? 'www.curseforge.com/minecraft' : 'modrinth.com'}/${path}/${dep.slug}`);
   }
 
   async function installPack(): Promise<void> {
@@ -647,13 +1251,112 @@ export default function Resources({
     }
   }
 
-  // ---- version options inside the dialog ----
+  // ---- options inside the dialog ----
 
-  const dialogGameVersionOptions = useMemo(() => {
-    const set = new Set<string>();
-    for (const v of dialogVersions) for (const gv of v.gameVersions) set.add(gv);
-    return [...set].sort(compareVersionsDesc);
-  }, [dialogVersions]);
+  /**
+   * The game-version filter's options — only versions the project ships files for.
+   *
+   * Listing every Minecraft version let the user pick one with no files and land
+   * on "没有匹配的版本" with no obvious way back.
+   */
+  // ---- dependencies of the picked version ----
+
+  /** The version whose 下载/安装 action will run. */
+  const pickedVersion = useMemo(
+    () => dialogVersions.find((v) => v.id === packVersionId) ?? null,
+    [dialogVersions, packVersionId],
+  );
+
+  /**
+   * Resolve dependencies for the picked version.
+   *
+   * Runs on selection rather than for the whole list: each dependency costs a
+   * request, and a project can list dozens of versions. `cancelled` guards against
+   * a slow response arriving for a version the user already moved away from.
+   *
+   * `dialogTarget` is a dependency on purpose: "already installed?" is answered by
+   * reading that folder, so switching to another game version or picking a manual
+   * folder must re-resolve — otherwise the rows keep reporting the previous
+   * folder's contents and the replace/install state is wrong.
+   */
+  useEffect(() => {
+    const declared = pickedVersion?.dependencies ?? [];
+    if (!pickedVersion || declared.length === 0) {
+      setDependencies(null);
+      setDependencyError('');
+      return;
+    }
+    let cancelled = false;
+    setDependencies(null);
+    setDependencyError('');
+    void (async () => {
+      try {
+        // Match against the picked version's own support, not the dialog filters.
+        // With no local game version installed the filters are empty, and matching
+        // "anything" resolved a 1.20.1 mod's dependency to a 26.4 build.
+        const games = dialogGameVersion
+          ? [dialogGameVersion]
+          : minecraftVersionsOnly(pickedVersion.gameVersions);
+        const loaderList = dialogLoader ? [dialogLoader] : pickedVersion.loaders;
+        const resolved = await window.slcl.resources.dependencies(type, declared, {
+          source: project?.source ?? 'modrinth',
+          ...(games.length > 0 ? { gameVersions: games } : {}),
+          ...(loaderList.length > 0 ? { loaders: loaderList } : {}),
+          target: dialogTarget,
+        });
+        if (!cancelled) setDependencies(resolved);
+      } catch (e) {
+        if (!cancelled) {
+          setDependencies([]);
+          setDependencyError(e instanceof Error ? e.message : String(e));
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pickedVersion, type, project?.source, dialogGameVersion, dialogLoader, dialogTarget]);
+
+  /** Every dependency in the tree that still needs installing, required first. */
+  const missingDependencies = useMemo(() => {
+    const out: ResolvedDependency[] = [];
+    const walk = (list: ResolvedDependency[]): void => {
+      for (const dep of list) {
+        if (!dep.installed && dep.version) out.push(dep);
+        walk(dep.children);
+      }
+    };
+    walk(dependencies ?? []);
+    return out;
+  }, [dependencies]);
+
+  const dialogGameVersionOptions = useMemo(
+    () => [...dialogSupport.gameVersions].sort(compareVersionsDesc),
+    [dialogSupport.gameVersions],
+  );
+
+  /**
+   * The loader filter's options — only loaders the project ships files for.
+   *
+   * Same reasoning: offering Forge for a Fabric-only mod produced an empty list.
+   */
+  const dialogLoaderOptions = useMemo(
+    () => LOADERS.filter((l) => dialogSupport.loaders.includes(l)),
+    [dialogSupport.loaders],
+  );
+
+  /** Membership test for the game versions above. */
+  const dialogSupportsGameVersion = useCallback(
+    (version: string): boolean =>
+      version !== '' && dialogSupport.gameVersions.includes(version),
+    [dialogSupport.gameVersions],
+  );
+
+  /** Membership test for the loaders above. */
+  const dialogSupportsLoader = useCallback(
+    (loader: string): boolean => loader !== '' && dialogSupport.loaders.includes(loader),
+    [dialogSupport.loaders],
+  );
 
   /** Open a project's page on its own site, or a search on the other site. */
   function openPage(p: ResourceProject, site: ResourceSource): void {
@@ -681,72 +1384,6 @@ export default function Resources({
     } catch {
       await window.slcl.openExternal(`https://search.mcmod.cn/s?key=${encodeURIComponent(title)}`);
     }
-  }
-
-  function ResourceCard({ p, rank }: { p: ResourceProject; rank?: number }): JSX.Element {
-    const onModrinth = p.source === 'modrinth';
-    return (
-      <div className="card resource-card">
-        <div className="resource-head">
-          {p.iconUrl ? (
-            <img className="resource-icon" src={p.iconUrl} alt={p.title} loading="lazy" />
-          ) : (
-            <div className="resource-placeholder">{p.title.charAt(0).toUpperCase()}</div>
-          )}
-          <div className="resource-meta">
-            <div className="resource-title" title={p.title}>
-              {rank !== undefined && <span className="rank-badge">{rank}</span>}
-              {p.title}
-            </div>
-            <div className="resource-sub">
-              {p.author ? p.author : '未知作者'} · {formatCount(p.downloads)} 次下载
-              <span className={`badge source-badge ${onModrinth ? '' : 'badge-blue'}`}>
-                {onModrinth ? 'Modrinth' : 'CurseForge'}
-              </span>
-            </div>
-          </div>
-        </div>
-        {/* Description and chips always render so every card reserves the same
-            vertical space — without this the install buttons drift out of line
-            whenever a card has a shorter description or no tags. */}
-        <div className="resource-desc">{p.description ?? ''}</div>
-        <div className="chip-row">
-          {p.categories.slice(0, 3).map((c) => (
-            <span key={c} className="chip" title={c}>
-              {tagLabel(c)}
-            </span>
-          ))}
-        </div>
-        <div className="source-links">
-          <button
-            className="link-btn"
-            onClick={() => openPage(p, 'modrinth')}
-            title={onModrinth ? '在 Modrinth 打开原页面' : '按名称在 Modrinth 查找该资源'}
-          >
-            Modrinth
-          </button>
-          <span className="muted small">·</span>
-          <button
-            className="link-btn"
-            onClick={() => openPage(p, 'curseforge')}
-            title={!onModrinth ? '在 CurseForge 打开原页面' : '按名称在 CurseForge 查找该资源'}
-          >
-            CurseForge
-          </button>
-          <span className="muted small">·</span>
-          <button
-            className="link-btn"
-            onClick={() => void openMcmod(p.title)}
-            title="在 MC百科 查找该资源（有对应条目时直接打开）"
-          >
-            MC百科
-          </button>
-        </div>
-        <button className="btn btn-primary btn-block" onClick={() => void openDialog(p)} disabled={installing}>
-          安装
-        </button>
-      </div>
-    );
   }
 
   return (
@@ -925,15 +1562,36 @@ export default function Resources({
           {!searched ? (
             <p className="muted small">输入关键词搜索更多{tab.label},下方为热门推荐。</p>
           ) : searching ? (
-            <p className="muted small">正在从 Modrinth 获取…</p>
+            <p className="muted small">搜索中…</p>
           ) : results.length === 0 ? (
-            <p className="muted small">没有找到相关资源。</p>
+            <p className="muted small">
+              没有找到相关资源。
+              {translatedQuery
+                ? `已按中文名译为「${translatedQuery}」,可试试直接搜索英文名。`
+                : '可试试用英文名或更短的关键词。'}
+            </p>
           ) : (
-            <div className="grid-mods">
-              {results.map((p) => (
-                <ResourceCard key={p.id} p={p} />
-              ))}
-            </div>
+            <>
+              {translatedQuery && (
+                <p className="muted small" style={{ margin: '0 0 12px' }}>
+                  已按 MC百科 中文名译为「{translatedQuery}」搜索。
+                </p>
+              )}
+              <div className="grid-mods">
+                {results.map((p) => (
+                  <ResourceCard
+                    key={p.id}
+                    p={p}
+                    zh={zhOf(p)}
+                    installing={installing}
+                    showMcmod={useZhNames}
+                    onInstall={(proj) => void openDialog(proj)}
+                    onOpenPage={openPage}
+                    onOpenMcmod={(title) => void openMcmod(title)}
+                  />
+                ))}
+              </div>
+            </>
           )}
         </div>
       </div>
@@ -956,7 +1614,17 @@ export default function Resources({
           ) : (
             <div className="grid-mods">
               {recs.map((p, i) => (
-                <ResourceCard key={p.id} p={p} rank={(recPage - 1) * REC_PAGE_SIZE + i + 1} />
+                <ResourceCard
+                  key={p.id}
+                  p={p}
+                  rank={(recPage - 1) * REC_PAGE_SIZE + i + 1}
+                  zh={zhOf(p)}
+                  installing={installing}
+                  showMcmod={useZhNames}
+                  onInstall={(proj) => void openDialog(proj)}
+                  onOpenPage={openPage}
+                  onOpenMcmod={(title) => void openMcmod(title)}
+                />
               ))}
             </div>
           )}
@@ -1036,7 +1704,12 @@ export default function Resources({
       {project && (
         <div className="modal-backdrop">
           <div className="modal modal-lg">
-            <div className="modal-title">安装 · {project.title}</div>
+            <div className="modal-title">
+              安装 · {zhOf(project)}
+              {zhOf(project) !== project.title && (
+                <span className="resource-title-en">{project.title}</span>
+              )}
+            </div>
 
             <div className="modal-body">
               <div className="row" style={{ marginBottom: 12, flexWrap: 'wrap' }}>
@@ -1048,12 +1721,14 @@ export default function Resources({
                       setDialogGameVersion(v);
                       void loadDialogVersions(project, v, dialogLoader);
                     }}
+                    // Only the versions this resource actually supports: listing
+                    // every Minecraft version let the user pick one with no files
+                    // and see an empty list.
                     options={[
                       { value: '', label: '全部版本' },
-                      ...Array.from(new Set([...dialogGameVersionOptions, ...mcVersionOptions]))
-                        .sort(compareVersionsDesc)
-                        .map((v) => ({ value: v, label: v })),
+                      ...dialogGameVersionOptions.map((v) => ({ value: v, label: v })),
                     ]}
+                    disabled={dialogLoading && dialogGameVersionOptions.length === 0}
                   />
                 </div>
                 {tab.hasLoader && (
@@ -1067,8 +1742,11 @@ export default function Resources({
                       }}
                       options={[
                         { value: '', label: '全部加载器' },
-                        ...LOADERS.map((l) => ({ value: l, label: loaderLabel(l) })),
+                        // Only the loaders this resource supports: offering Forge
+                        // for a Fabric-only mod produced an empty version list.
+                        ...dialogLoaderOptions.map((l) => ({ value: l, label: loaderLabel(l) })),
                       ]}
+                      disabled={dialogLoading && dialogLoaderOptions.length === 0}
                     />
                   </div>
                 )}
@@ -1087,15 +1765,29 @@ export default function Resources({
                 ) : dialogVersions.length === 0 ? (
                   <p className="muted small">没有匹配的版本,请调整筛选条件。</p>
                 ) : (
-                  <div className="version-strip">
+<div className="version-strip">
                     {dialogVersions.map((v, index) => {
-                      const isPicked = type === 'modpack' && v.id === packVersionId;
+                      const isPicked = v.id === packVersionId;
+                      // A mod that declares dependencies gets a marker on the card,
+                      // so "there is more to install" is visible before picking. The
+                      // count has to match what the panel will list — required only,
+                      // and excluding the projects installed with the loader — or the
+                      // two numbers disagree.
+                      const depCount = countShownDependencies(v.dependencies);
                       return (
                         <div
                           key={v.id}
                           className={`version-card${isPicked ? ' picked' : ''}`}
-                          onClick={type === 'modpack' ? () => setPackVersionId(v.id) : undefined}
-                          style={type === 'modpack' ? { cursor: 'pointer' } : undefined}
+                          onClick={() => setPackVersionId(v.id)}
+                          style={{ cursor: 'pointer' }}
+                          role="button"
+                          tabIndex={0}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault();
+                              setPackVersionId(v.id);
+                            }
+                          }}
                         >
                           <div className="version-card-head">
                             <span className="version-card-num" title={`${v.versionNumber} · ${v.name}`}>
@@ -1111,30 +1803,55 @@ export default function Resources({
                             </span>
                             <span className="muted small">{formatBytes(v.fileSize)}</span>
                           </div>
-                          <div className="version-card-sub" title={v.gameVersions.join(', ')}>
-                            {v.gameVersions.slice(0, 3).join(', ')}
-                            {v.gameVersions.length > 3 ? ' …' : ''}
-                          </div>
+                          {/* CurseForge mixes loader tags into this list, so only
+                              real Minecraft versions are shown. */}
+                          {(() => {
+                            const gvs = minecraftVersionsOnly(v.gameVersions);
+                            return (
+                              <div className="version-card-sub" title={gvs.join(', ')}>
+                                {gvs.slice(0, 3).join(', ')}
+                                {gvs.length > 3 ? ' …' : ''}
+                              </div>
+                            );
+                          })()}
                           <div className="version-card-sub">{formatDate(v.datePublished)}</div>
-                          {type === 'modpack' ? (
-                            <span className={`btn btn-sm btn-block${isPicked ? ' btn-primary' : ''}`}>
-                              {isPicked ? '已选择' : '选择'}
+                          {depCount > 0 ? (
+                            <span
+                              className="badge version-card-dep-badge"
+                              title={`该版本需要 ${depCount} 个前置模组`}
+                            >
+                              前置 {depCount}
                             </span>
                           ) : (
-                            <button
-                              className="btn btn-primary btn-sm btn-block"
-                              onClick={() => void installVersionFile(v)}
-                              disabled={installing}
-                            >
-                              {installing ? '安装中…' : '下载'}
-                            </button>
+                            <span className="badge version-card-dep-badge is-none">无前置</span>
                           )}
+                          <span className={`btn btn-sm btn-block${isPicked ? ' btn-primary' : ''}`}>
+                            {isPicked ? '已选择' : '选择'}
+                          </span>
                         </div>
                       );
                     })}
                   </div>
                 )}
+
               </div>
+
+              {/* ---- dependencies (前置模组) ---- */}
+              <DependencyPanel
+                dependencies={dependencies}
+                loading={dependencies === null && (pickedVersion?.dependencies?.length ?? 0) > 0}
+                error={dependencyError}
+                missing={missingDependencies}
+                autoInstall={autoInstallDeps}
+                onToggleAutoInstall={setAutoInstallDeps}
+                onInstall={(dep) => void installDependency(dep)}
+                onOpenProject={openDependencyPage}
+                installing={installing}
+                versionChoice={depVersionChoice}
+                onChooseVersion={(projectId, versionId) =>
+                  setDepVersionChoice((prev) => ({ ...prev, [projectId]: versionId }))
+                }
+              />
 
               {/* install target */}
               {type === 'modpack' ? (
@@ -1233,13 +1950,25 @@ export default function Resources({
               <button className="btn" onClick={() => setProject(null)} disabled={installing}>
                 关闭
               </button>
-              {type === 'modpack' && (
+              {type === 'modpack' ? (
                 <button
                   className="btn btn-primary"
                   onClick={() => void installPack()}
                   disabled={installing || dialogVersions.length === 0}
                 >
                   {installing ? '安装中…' : '安装整合包'}
+                </button>
+              ) : (
+                <button
+                  className="btn btn-primary"
+                  onClick={() => void installPickedVersion()}
+                  disabled={installing || !pickedVersion}
+                >
+                  {installing
+                    ? '安装中…'
+                    : missingDependencies.length > 0 && autoInstallDeps
+                      ? `安装(含 ${missingDependencies.length} 个前置)`
+                      : '安装'}
                 </button>
               )}
             </div>

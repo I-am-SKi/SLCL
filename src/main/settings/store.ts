@@ -13,6 +13,9 @@ function defaultSettings(): AppSettings {
     colorMode: 'dark',
     backgroundImage: '',
     backgroundOpacity: 0.35,
+    titlebarMode: 'default',
+    titlebarText: '',
+    titlebarIcon: true,
     versionOverrides: {},
     javaPath: '',
     javaSelection: 'auto',
@@ -65,6 +68,19 @@ function migrate(): void {
   const selected = (store.store as Record<string, unknown>).selectedVersionId;
   if (selected !== null && typeof selected !== 'string') {
     store.set('selectedVersionId', null);
+  }
+
+  // New in the custom-title-bar model: older configs have neither key, and a
+  // hand-edited file could hold anything. Anything unexpected falls back to the
+  // shipped look rather than rendering a broken title bar.
+  const mode = (store.store as Record<string, unknown>).titlebarMode;
+  if (mode !== 'default' && mode !== 'custom') store.set('titlebarMode', 'default');
+  const text = (store.store as Record<string, unknown>).titlebarText;
+  if (typeof text !== 'string') store.set('titlebarText', '');
+  // Configs written before the icon toggle existed have no key; anything
+  // non-boolean (hand-edited) falls back to showing the logo.
+  if (typeof (store.store as Record<string, unknown>).titlebarIcon !== 'boolean') {
+    store.set('titlebarIcon', true);
   }
 }
 migrate();

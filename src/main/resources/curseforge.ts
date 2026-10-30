@@ -5,14 +5,17 @@ import { randomUUID } from 'crypto';
 import { open as openZip, readEntry, walkEntriesGenerator } from '@xmcl/unzip';
 import type {
   DownloadProgress,
+  ResourceDependency,
   ModpackInstallResult,
   ResourceInstallResult,
   ResourceInstallTarget,
   ResourceProject,
   ResourceSearchOptions,
+  ResourceSource,
   ResourceType,
   ResourceVersion,
 } from '@shared/types';
+import { userAgent } from '../ua';
 import { getSettings } from '../settings/store';
 import { getVersionGameDir, installVersion, listLocalVersions } from '../versions';
 import { createThrottle, runPool } from '../download/pool';
@@ -61,6 +64,11 @@ const LOADER_TYPE: Record<string, number> = {
   neoforge: 6,
 };
 
+/** Inverse of `LOADER_TYPE`, for reading a project's supported loaders back out. */
+const LOADER_NAME: Record<number, string> = Object.fromEntries(
+  Object.entries(LOADER_TYPE).map(([name, id]) => [id, name]),
+);
+
 interface CfMod {
   id: number;
   name?: string;
@@ -87,6 +95,45 @@ interface CfFile {
   downloadUrl?: string | null;
   isAvailable?: boolean;
   fileFingerprint?: number;
+  /** Declared relations to other projects; see `cfDependencyKind`. */
+  dependencies?: Array<{ modId?: number; relationType?: number }>;
+}
+
+/**
+ * CurseForge file relation codes, mapped onto what the launcher cares about.
+ *
+ *   1 EmbeddedLibrary   — already inside the jar, nothing to download
+ *   2 OptionalDependency — nice to have
+ *   3 RequiredDependency — the mod will not load without it
+ *   4 Tool              — dev tooling, not a runtime dependency
+ *   5 Incompatible      — must NOT be installed alongside
+ *   6 Include           — shipped with the parent, nothing to download
+ *
+ * Only 2 and 3 become `ResourceDependency`; the rest are dropped so the UI does
+ * not suggest installing something that is already inside the file.
+ */
+function cfDependencyKind(relationType: number | undefined): 'required' | 'optional' | null {
+  if (relationType === 3) return 'required';
+  if (relationType === 2) return 'optional';
+  return null;
+}
+
+/** Convert a file's raw relations into the launcher's dependency shape. */
+function toCfDependencies(
+  raw: Array<{ modId?: number; relationType?: number }> | undefined,
+): ResourceDependency[] | undefined {
+  if (!raw || raw.length === 0) return undefined;
+  const out: ResourceDependency[] = [];
+  const seen = new Set<string>();
+  for (const dep of raw) {
+    const kind = cfDependencyKind(dep.relationType);
+    if (!kind || dep.modId === undefined) continue;
+    const projectId = String(dep.modId);
+    if (seen.has(projectId)) continue;
+    seen.add(projectId);
+    out.push({ projectId, kind });
+  }
+  return out.length > 0 ? out : undefined;
 }
 
 interface CfPage<T> {
@@ -195,7 +242,135 @@ export async function listCurseforgeVersions(
       fileSize: f.fileLength ?? 0,
       // Resolved lazily: many files hide the direct URL from the API.
       url: f.downloadUrl ?? '',
+      dependencies: toCfDependencies(f.dependencies),
     }));
+}
+
+/**
+ * Titles + slugs for a batch of project ids, for labelling dependencies.
+ *
+ * Uses the batch `POST /mods` endpoint (verified to work through the MCIM mirror)
+ * so a project with six dependencies costs one request instead of six. Unknown ids
+ * are simply absent from the map — callers fall back to showing the id.
+ */
+export async function lookupCurseforgeProjects(
+  projectIds: readonly string[],
+): Promise<Map<string, { title: string; slug: string }>> {
+  const out = new Map<string, { title: string; slug: string }>();
+  const ids = [...new Set(projectIds.map((id) => Number(id)).filter((n) => Number.isFinite(n)))];
+  if (ids.length === 0) return out;
+
+  const key = getSettings().curseforgeApiKey?.trim() ?? '';
+  const candidates = curseforgeCandidates(key);
+  for (const candidate of candidates) {
+    try {
+      const res = await fetch(candidate.url + '/mods', {
+        method: 'POST',
+        headers: {
+          'User-Agent': userAgent(),
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          ...candidate.headers,
+        },
+        body: JSON.stringify({ modIds: ids, filterPcOnly: false }),
+        signal: AbortSignal.timeout(candidate.timeoutMs ?? 30000),
+      });
+      if (!res.ok) continue;
+      const body = (await res.json()) as { data?: CfMod[] };
+      for (const mod of body.data ?? []) {
+        out.set(String(mod.id), {
+          title: mod.name ?? String(mod.id),
+          slug: mod.slug ?? String(mod.id),
+        });
+      }
+      return out;
+    } catch {
+      /* try the next host */
+    }
+  }
+  return out;
+}
+
+/** Cap on how many dependency versions are offered in the picker. */
+const MAX_DEPENDENCY_CANDIDATES = 60;
+
+/**
+ * List CurseForge files of a project that could satisfy a dependency, best first.
+ *
+ * Same ordering contract as the Modrinth side: exact match (game + loader) first,
+ * then each partial match, newest release before newer betas within a group.
+ *
+ * CurseForge's `gameVersions` mixes real versions with loader/platform tags, so the
+ * loader half is matched against those tags ("Forge", "NeoForge", "Fabric") rather
+ * than a separate field.
+ */
+export async function listCurseforgeProjectVersions(
+  projectId: string,
+  gameVersions?: string[],
+  loaders?: string[],
+): Promise<ResourceVersion[]> {
+  try {
+    const data = await cfGet<CfPage<CfFile>>(`/mods/${encodeURIComponent(projectId)}/files`, {
+      pageSize: 50,
+    });
+    const files = (data.data ?? []).filter((f) => f.isAvailable !== false);
+    if (files.length === 0) return [];
+
+    const wantGames = new Set((gameVersions ?? []).map((g) => g.toLowerCase()));
+    const wantLoaders = new Set((loaders ?? []).map((l) => l.toLowerCase()));
+    const tags = (f: CfFile): string[] => (f.gameVersions ?? []).map((v) => v.toLowerCase());
+
+    const matchesGames = (f: CfFile): boolean =>
+      wantGames.size === 0 || tags(f).some((t) => wantGames.has(t));
+    const matchesLoaders = (f: CfFile): boolean =>
+      wantLoaders.size === 0 || tags(f).some((t) => wantLoaders.has(t));
+
+    const rank = (f: CfFile): number => {
+      const g = matchesGames(f);
+      const l = matchesLoaders(f);
+      if (g && l) return 0;
+      if (g) return 1;
+      if (l) return 2;
+      return 3;
+    };
+
+    const byDate = (a: CfFile, b: CfFile): number =>
+      Date.parse(b.fileDate ?? '') - Date.parse(a.fileDate ?? '');
+    const releaseWeight = (f: CfFile): number => {
+      const t = releaseTypeOf(f.releaseType);
+      return t === 'release' ? 0 : t === 'beta' ? 1 : 2;
+    };
+    const byRelease = (a: CfFile, b: CfFile): number => releaseWeight(a) - releaseWeight(b);
+
+    return [...files]
+      .sort((a, b) => rank(a) - rank(b) || byRelease(a, b) || byDate(a, b))
+      .slice(0, MAX_DEPENDENCY_CANDIDATES)
+      .map((f) => ({
+        id: String(f.id),
+        name: f.displayName ?? f.fileName ?? String(f.id),
+        versionNumber: f.displayName ?? f.fileName ?? String(f.id),
+        versionType: releaseTypeOf(f.releaseType),
+        datePublished: f.fileDate ?? '',
+        downloads: 0,
+        gameVersions: minecraftOnlyGameVersions(f.gameVersions),
+        loaders: [],
+        filename: f.fileName ?? `curseforge-${f.id}.jar`,
+        fileSize: f.fileLength ?? 0,
+        url: f.downloadUrl ?? '',
+        dependencies: toCfDependencies(f.dependencies),
+      }));
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * CurseForge mixes loader/platform tags into `gameVersions` (a JEI file reports
+ * `["Client","NeoForge","Server","26.1"]`). Showing "Client" as a game version is
+ * nonsense, and filtering by it returns nothing, so only real versions survive.
+ */
+function minecraftOnlyGameVersions(list: string[] | undefined): string[] {
+  return (list ?? []).filter((v) => /^\d+(\.\d+)+(-(pre|rc)\d+)?$/i.test(v) || /^\d{2}w\d{2}[a-z]$/i.test(v));
 }
 
 /** Resolve a downloadable URL for a CurseForge file (API fallback). */
@@ -208,6 +383,40 @@ async function resolveFileUrl(modId: string, fileId: string, known?: string): Pr
     throw new Error('该文件不允许第三方启动器下载(作者关闭了 API 分发),请在网页手动下载');
   }
   return res.data;
+}
+
+/**
+ * Every Minecraft version and mod loader this project ships files for.
+ *
+ * Both lists come from the mod detail endpoint's `latestFilesIndexes` — one entry
+ * per (game version × loader) combination of the newest file in that slot, so the
+ * unions cover the project's whole support matrix (JEI reports 51 Minecraft
+ * versions across forge/fabric/neoforge) in a single request.
+ *
+ * Paging `/files` instead would need dozens of requests: the API caps a page at 50
+ * files and popular projects have thousands.
+ */
+export async function listCurseforgeSupport(projectId: string): Promise<{
+  gameVersions: string[];
+  loaders: string[];
+}> {
+  interface Detail {
+    latestFilesIndexes?: Array<{ gameVersion?: string; modLoader?: number }>;
+  }
+  const res = await cfGet<{ data?: Detail }>(`/mods/${encodeURIComponent(projectId)}`);
+  const indexes = res.data?.latestFilesIndexes ?? [];
+
+  const gameVersions = new Set<string>();
+  const loaders = new Set<string>();
+  for (const entry of indexes) {
+    if (entry.gameVersion) gameVersions.add(entry.gameVersion);
+    if (entry.modLoader !== undefined) {
+      const name = LOADER_NAME[entry.modLoader];
+      // 0 stands for "any/unknown" and carries no information.
+      if (name) loaders.add(name);
+    }
+  }
+  return { gameVersions: [...gameVersions], loaders: [...loaders] };
 }
 
 // ---- install ----
@@ -226,6 +435,12 @@ export async function installCurseforge(
   versionId: string,
   target: ResourceInstallTarget,
   resolveTargetDir: (t: ResourceType, target: ResourceInstallTarget) => string,
+  /**
+   * Post-download hook: remembers the jar's modIds and removes same-modId duplicates.
+   * Injected by the caller because it lives in the resources module, which already
+   * imports this one — importing back would be a cycle.
+   */
+  onInstalled?: (destPath: string, source: ResourceSource, projectId: string) => Promise<void>,
 ): Promise<ResourceInstallResult> {
   if (type === 'modpack') throw new Error('整合包必须通过整合包安装流程安装');
 
@@ -238,6 +453,7 @@ export async function installCurseforge(
   const filename = basename(file.filename);
   const dest = join(dir, filename);
   await downloadToFile(url, dest);
+  if (type === 'mod' && onInstalled) await onInstalled(dest, 'curseforge', projectId);
 
   return { path: dest, filename, title: file.name, versionNumber: file.versionNumber };
 }

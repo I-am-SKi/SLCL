@@ -21,13 +21,16 @@ import type {
   ResourceFileInfo,
   ResourceInstallResult,
   ResourceInstallTarget,
-  ResourceProject,
+  ResolvedDependency,
+  ResourceDependency,
   ResourceSearchOptions,
+  ResourceSearchResult,
   ResourceSource,
   ResourceType,
   ResourceVersion,
   ScreenshotInfo,
   SkinLookupResult,
+  SkinVariant,
   SlattApplyResult,
   SlattSession,
   SlattSkin,
@@ -67,8 +70,17 @@ export interface SlclApi {
     getSkin(accountId: string, force?: boolean): Promise<string>;
     /** Force a fresh skin lookup (ignores caches). Same as `getSkin(id, true)`. */
     refreshSkin(accountId: string): Promise<string>;
-    /** Save a locally-picked PNG (base64) as this account's skin cache. */
-    setLocalSkin(accountId: string, pngBase64: string): Promise<void>;
+    /**
+     * Save a locally-picked PNG (base64) as this account's skin.
+     *
+     * For offline accounts this is the skin the game will actually show: the
+     * launcher serves it through a loopback Yggdrasil server at launch. `variant`
+     * is the arm width and is part of the skin's texture metadata, so it must be
+     * stored alongside the image.
+     */
+    setLocalSkin(accountId: string, pngBase64: string, variant?: SkinVariant): Promise<void>;
+    /** Arm width of the account's local skin (defaults to classic). */
+    skinVariant(accountId: string): Promise<SkinVariant>;
     /** Look up a premium account's skin by username (no auth required). */
     lookupSkin(username: string): Promise<SkinLookupResult>;
     /** Apply a premium account's skin to a local account (saved to cache). */
@@ -189,12 +201,18 @@ export interface SlclApi {
     saveSkin(skinId: number, dir: string): Promise<string>;
   };
   resources: {
-    /** Search Modrinth for projects of the given type. */
+    /**
+     * Search the active site for projects of the given type.
+     *
+     * A keyword containing Chinese is resolved to its English project names via
+     * MC百科 first (Modrinth / CurseForge only index English titles), so typing
+     * "机械动力" finds Create. `translatedQuery` reports that mapping.
+     */
     search(
       type: ResourceType,
       query: string,
       options?: ResourceSearchOptions,
-    ): Promise<ResourceProject[]>;
+    ): Promise<ResourceSearchResult>;
     /**
      * List the downloadable versions of a project (newest first) — this powers the
      * "historical versions" picker. Filter by game version / loader when given.
@@ -204,6 +222,35 @@ export interface SlclApi {
       projectId: string,
       options?: ResourceSearchOptions,
     ): Promise<ResourceVersion[]>;
+    /**
+     * Every Minecraft version and mod loader the project ships files for.
+     *
+     * Backs the install dialog's filters, which must not offer values the
+     * resource never supported.
+     */
+    support(
+      projectId: string,
+      source?: ResourceSource,
+    ): Promise<{ gameVersions: string[]; loaders: string[] }>;
+    /**
+     * Resolve a version's declared dependencies ("前置模组") into something the UI
+     * can act on: title, the file that would be installed, already-installed state.
+     *
+     * Only dependencies the author declared are visible here — a mod that silently
+     * needs something cannot be detected by any launcher.
+     */
+    dependencies(
+      type: ResourceType,
+      dependencies: ResourceDependency[],
+      options: {
+        source: ResourceSource;
+        /** Game versions the dependency must support (from the dependent version). */
+        gameVersions?: string[];
+        /** Loaders the dependency must support (from the dependent version). */
+        loaders?: string[];
+        target: ResourceInstallTarget;
+      },
+    ): Promise<ResolvedDependency[]>;
     /** Download one specific version file into the resolved target folder. */
     install(
       type: ResourceType,
@@ -227,6 +274,17 @@ export interface SlclApi {
     targetDir(type: ResourceType, target: ResourceInstallTarget): Promise<string>;
     /** MC百科 entry for a project title (direct URL when matched, plus a search URL). */
     mcmod(title: string): Promise<{ url: string | null; search: string }>;
+    /**
+     * Chinese names for a page of cards.
+     *
+     * Resolves immediately with whatever is already cached, and queues the rest in
+     * the background — mcmod allows roughly one request per second, so a page of
+     * cards takes ~20s to fill in completely on first visit. Newly resolved names
+     * arrive through `onZhName`.
+     */
+    zhNames(titles: string[]): Promise<Record<string, string>>;
+    /** Subscribe to Chinese names resolved in the background. */
+    onZhName(cb: (payload: { title: string; zh: string }) => void): () => void;
   };
   openExternal(url: string): Promise<void>;
   selectDirectory(): Promise<string | null>;

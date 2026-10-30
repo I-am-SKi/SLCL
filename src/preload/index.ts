@@ -16,10 +16,12 @@ import type {
   RemoteMinecraftVersion,
   ResourceFileInfo,
   ResourceInstallResult,
-  ResourceProject,
+  ResolvedDependency,
+  ResourceSearchResult,
   ResourceVersion,
   ScreenshotInfo,
   SkinLookupResult,
+  SkinVariant,
   SlattApplyResult,
   SlattSession,
   SlattSkin,
@@ -57,7 +59,10 @@ const api: SlclApi = {
     resetSkin: (accountId) => ipcRenderer.invoke(IPC.accountResetSkin, accountId) as Promise<void>,
     getSkin: (accountId, force) => ipcRenderer.invoke(IPC.accountGetSkin, accountId, force ?? false) as Promise<string>,
     refreshSkin: (accountId) => ipcRenderer.invoke(IPC.accountGetSkin, accountId, true) as Promise<string>,
-    setLocalSkin: (accountId, pngBase64) => ipcRenderer.invoke(IPC.accountSetLocalSkin, accountId, pngBase64) as Promise<void>,
+    setLocalSkin: (accountId, pngBase64, variant) =>
+      ipcRenderer.invoke(IPC.accountSetLocalSkin, accountId, pngBase64, variant) as Promise<void>,
+    skinVariant: (accountId) =>
+      ipcRenderer.invoke(IPC.accountSkinVariant, accountId) as Promise<SkinVariant>,
     lookupSkin: (username) => ipcRenderer.invoke(IPC.accountLookupSkin, username) as Promise<SkinLookupResult>,
     littleSkinRoles: (accountId, password, loginName) =>
       ipcRenderer.invoke(IPC.accountLittleSkinRoles, accountId, password, loginName) as Promise<LittleSkinRoles>,
@@ -127,9 +132,18 @@ const api: SlclApi = {
   },
   resources: {
     search: (type, query, options) =>
-      ipcRenderer.invoke(IPC.resourcesSearch, type, query, options) as Promise<ResourceProject[]>,
+      ipcRenderer.invoke(IPC.resourcesSearch, type, query, options) as Promise<ResourceSearchResult>,
     versions: (type, projectId, options) =>
       ipcRenderer.invoke(IPC.resourcesVersions, type, projectId, options) as Promise<ResourceVersion[]>,
+    support: (projectId, source) =>
+      ipcRenderer.invoke(IPC.resourcesGameVersions, projectId, source) as Promise<{
+        gameVersions: string[];
+        loaders: string[];
+      }>,
+    dependencies: (type, dependencies, options) =>
+      ipcRenderer.invoke(IPC.resourcesDependencies, type, dependencies, options) as Promise<
+        ResolvedDependency[]
+      >,
     install: (type, projectId, versionId, target, source) =>
       ipcRenderer.invoke(IPC.resourcesInstall, type, projectId, versionId, target, source) as Promise<ResourceInstallResult>,
     installModpack: (projectId, versionId, name, source) =>
@@ -140,6 +154,8 @@ const api: SlclApi = {
       ipcRenderer.invoke(IPC.resourcesRemove, type, filename, target) as Promise<void>,
     mcmod: (title) =>
       ipcRenderer.invoke(IPC.resourcesMcmodLink, title) as Promise<{ url: string | null; search: string }>,
+    zhNames: (titles) => ipcRenderer.invoke(IPC.resourcesZhNames, titles) as Promise<Record<string, string>>,
+    onZhName: (cb) => subscribe<{ title: string; zh: string }>(IPC.resourcesZhNameResolved)(cb),
     targetDir: (type, target) =>
       ipcRenderer.invoke(IPC.resourcesTargetDir, type, target) as Promise<string>,
   },

@@ -4,13 +4,23 @@
  * 更多 page (which edits it). Keeping it in a module singleton means both stay in
  * sync without prop-drilling, and the launcher persists the values to settings.
  */
+import { THEME_IDS as THEME_IDS_LIST } from './themes';
+
 export type ColorMode = 'dark' | 'light';
+
+/** Title bar label mode: the shipped logo + "SLCL", or a user-supplied text. */
+export type TitlebarMode = 'default' | 'custom';
 
 export interface Appearance {
   colorMode: ColorMode;
   theme: string;
   backgroundImage: string;
   backgroundOpacity: number;
+  titlebarMode: TitlebarMode;
+  /** Only meaningful when `titlebarMode === 'custom'`; blank means "no title". */
+  titlebarText: string;
+  /** Independent of the text: the logo can be hidden while keeping a title. */
+  titlebarIcon: boolean;
 }
 
 let current: Appearance = {
@@ -18,10 +28,15 @@ let current: Appearance = {
   theme: 'emerald',
   backgroundImage: '',
   backgroundOpacity: 0.35,
+  titlebarMode: 'default',
+  titlebarText: '',
+  titlebarIcon: true,
 };
 const listeners = new Set<(a: Appearance) => void>();
 
-const THEME_IDS = new Set(['emerald', 'ocean', 'sunset', 'sakura', 'violet', 'lime', 'red', 'indigo']);
+// Derived from THEMES so a new theme can never be forgotten here — an id missing
+// from this set would silently fall back to emerald when applied.
+const THEME_IDS = new Set(THEME_IDS_LIST);
 
 function emit(): void {
   for (const l of listeners) l(current);
@@ -70,6 +85,10 @@ export async function initAppearance(): Promise<Appearance> {
       theme: s.theme || 'emerald',
       backgroundImage: s.backgroundImage ?? '',
       backgroundOpacity: typeof s.backgroundOpacity === 'number' ? s.backgroundOpacity : 0.35,
+      titlebarMode: s.titlebarMode === 'custom' ? 'custom' : 'default',
+      titlebarText: typeof s.titlebarText === 'string' ? s.titlebarText : '',
+      // Missing on configs written before the toggle existed: default to showing it.
+      titlebarIcon: typeof s.titlebarIcon === 'boolean' ? s.titlebarIcon : true,
     });
   } catch {
     return setAppearance({});

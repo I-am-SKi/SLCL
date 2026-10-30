@@ -5,6 +5,16 @@
 
 export type AccountType = 'offline' | 'microsoft' | 'littleskin';
 
+/**
+ * Arm width of a skin.
+ *
+ * Minecraft stores this in the skin's texture metadata (`metadata.model`), not in
+ * the PNG: `slim` is Alex's 3px arms, `classic` is Steve's 4px ones. Shared so the
+ * renderer, the IPC layer and the launch-time skin server all speak the same
+ * vocabulary (`slim` also matches what Mojang's upload API and slatt.cn expect).
+ */
+export type SkinVariant = 'classic' | 'slim';
+
 export interface AccountProfile {
   /** Stable unique id used to reference the account (offline: uuid, microsoft: profile uuid). */
   id: string;
@@ -302,10 +312,16 @@ export interface LittleSkinRoles {
 //
 // This integration is for SLATT team members only: accounts on slatt.cn can only
 // be registered by team members, so a successful SSO login always means "member".
-// `groupId` still distinguishes member / admin / owner for display purposes.
+// `groupId` still distinguishes the permission group for display purposes.
 
-/** Role on the team site, derived from the account's `group_id`. */
-export type SlattRole = 'member' | 'captain' | 'admin' | 'owner' | 'unknown';
+/**
+ * Role on the team site, derived from the account's `group_id`.
+ *
+ * The site's permission groups are `super_admin` (超级管理员), `captain` (主管),
+ * `tech` (技术部成员) and `member` (SLATT 成员). Any other group_id — including a
+ * missing one — is treated as an ordinary member.
+ */
+export type SlattRole = 'super_admin' | 'captain' | 'tech' | 'member';
 
 /** A skin published to the team's public library (`GET /api/skins`). */
 export interface SlattSkin {
@@ -333,7 +349,7 @@ export interface SlattUser {
   avatarUrl: string;
   groupId: string;
   role: SlattRole;
-  /** Human label for the badge, e.g. 团队成员 / 团队管理员 / 团队主管. */
+  /** Human label for the badge, already prefixed: e.g. SLATT团队主管. */
   roleLabel: string;
   /** Whether the member has bound a skin of their own on the website. */
   hasSkin: boolean;
@@ -391,6 +407,12 @@ export interface ResourceProject {
   source: ResourceSource;
   /** Direct link to the project's page on its own site. */
   pageUrl?: string;
+  /**
+   * Chinese name from MC百科, set only when the search keyword was Chinese and
+   * this project is one of the translated hits (e.g. title "Create", titleZh
+   * "机械动力"). Purely presentational.
+   */
+  titleZh?: string;
 }
 
 /** Search filters for the resource browser. */
@@ -408,6 +430,70 @@ export interface ResourceSearchOptions {
   sortBy?: 'relevance' | 'downloads' | 'newest' | 'updated';
   limit?: number;
   offset?: number;
+}
+
+/** Result of a resource search, including how a Chinese keyword was translated. */
+export interface ResourceSearchResult {
+  items: ResourceProject[];
+  /**
+   * The English name a Chinese keyword was translated to, when translation was
+   * applied. Absent for English keywords and when no confident match was found.
+   */
+  translatedQuery?: string;
+}
+
+/**
+ * One dependency declared by a resource version — the "前置模组" a mod needs
+ * before it will load.
+ *
+ * Both upstream sites expose these per *file*, not per project, and only for
+ * dependencies the author actually declared. A mod that silently needs something
+ * and never listed it cannot be detected (this is the same limitation every
+ * launcher has).
+ */
+export interface ResourceDependency {
+  /** Project id, on the same site as the dependent. */
+  projectId: string;
+  /**
+   * Version id when the author pinned one (Modrinth only). When absent the
+   * resolver picks the newest version matching the target game version + loader.
+   */
+  versionId?: string;
+  /** `required` = the mod will not load without it; `optional` = recommended. */
+  kind: 'required' | 'optional';
+}
+
+/** A dependency after resolution: its title, the file that would be installed, and state. */
+export interface ResolvedDependency extends ResourceDependency {
+  /** Project title, or the project id when the lookup failed. */
+  title: string;
+  /** URL slug for building the project page link. */
+  slug: string;
+  /**
+   * Every version the user may pick, best match first (same game version + loader
+   * before partial matches, newest first within each group). Capped server-side.
+   */
+  candidates: ResourceVersion[];
+  /**
+   * The default choice — always `candidates[0]`, or null when nothing matches.
+   * The UI lets the user override it; an override is a client-side selection so the
+   * list does not have to be re-resolved.
+   */
+  version: ResourceVersion | null;
+  /** Why no version could be chosen. Empty when `version` is set. */
+  problem?: string;
+  /** True when this dependency already sits in the target folder. */
+  installed: boolean;
+  /**
+   * The jar that satisfies this dependency, when one is present.
+   *
+   * Filled when *any* version of the mod is installed — not just the exact file the
+   * resolver picked — so the UI can say "6.0.8 is installed; installing 6.0.7 will
+   * replace it" instead of pretending nothing is there.
+   */
+  installedFile?: { filename: string; version: string };
+  /** Dependencies of this dependency (one level deeper). May be empty. */
+  children: ResolvedDependency[];
 }
 
 /** A concrete downloadable version of a resource project (used for "historical versions"). */
@@ -429,6 +515,11 @@ export interface ResourceVersion {
   fileSize: number;
   /** Direct download url of the primary file. */
   url: string;
+  /**
+   * What this specific file declares it needs. Empty/absent means "nothing
+   * declared", not "nothing needed" — see ResourceDependency.
+   */
+  dependencies?: ResourceDependency[];
 }
 
 /** Where a resource file should be installed. */
@@ -491,6 +582,23 @@ export interface AppSettings {
   backgroundImage: string;
   /** Background image opacity, 0..1. */
   backgroundOpacity: number;
+  /**
+   * Title bar label mode.
+   *
+   * `default` shows "SLCL" as the title. `custom` shows `titlebarText` instead;
+   * when that text is blank there is no title at all.
+   */
+  titlebarMode: 'default' | 'custom';
+  /** User-supplied title bar text. Only read when `titlebarMode === 'custom'`. */
+  titlebarText: string;
+  /**
+   * Whether the launcher logo is shown in the title bar.
+   *
+   * Independent of `titlebarMode`/`titlebarText`: the icon can be kept while using
+   * a custom title, or dropped to leave a text-only strip. With both the icon and
+   * the title off the bar is empty apart from the window buttons.
+   */
+  titlebarIcon: boolean;
   /** Per-game-version launch overrides, keyed by version id. */
   versionOverrides: Record<string, VersionLaunchOverride>;
   /** Global default java path override; empty string means auto-detect. */

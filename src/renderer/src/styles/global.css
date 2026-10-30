@@ -9,9 +9,9 @@
   --text: #e6e8ef;
   --text-muted: #8b90a0;
   --text-dim: #62687a;
-  --accent: #22d3a5;
-  --accent-hover: #2ee6b7;
-  --accent-dim: rgba(34, 211, 165, 0.14);
+  --accent: #1ce3ae;
+  --accent-hover: #40e7bb;
+  --accent-dim: rgba(28, 227, 174, 0.15);
   /* Text/icon colour drawn on top of a filled accent surface. */
   --accent-contrast: #052e23;
   --danger: #f0506e;
@@ -83,45 +83,80 @@
 
 /* Accent shades tuned for a light background: deeper hues keep white text on
    filled buttons above WCAG AA (4.5:1) while staying clearly "that" colour. */
-:root[data-mode='light'][data-theme='emerald'] {
-  --accent: #047857;
-  --accent-hover: #059669;
-  --accent-dim: rgba(4, 120, 87, 0.1);
-}
-:root[data-mode='light'][data-theme='ocean'] {
-  --accent: #0369a1;
-  --accent-hover: #0284c7;
-  --accent-dim: rgba(3, 105, 161, 0.1);
+:root[data-mode='light'][data-theme='red'] {
+  --accent: #a10c0c;
+  --accent-hover: #c20e0e;
+  --accent-dim: rgba(161, 12, 12, 0.1);
 }
 :root[data-mode='light'][data-theme='sunset'] {
-  --accent: #c2410c;
-  --accent-hover: #ea580c;
-  --accent-dim: rgba(194, 65, 12, 0.1);
+  --accent: #c15508;
+  --accent-hover: #e36409;
+  --accent-dim: rgba(193, 85, 8, 0.1);
 }
-:root[data-mode='light'][data-theme='sakura'] {
-  --accent: #be185d;
-  --accent-hover: #db2777;
-  --accent-dim: rgba(190, 24, 93, 0.1);
-}
-:root[data-mode='light'][data-theme='violet'] {
-  --accent: #6d28d9;
-  --accent-hover: #7c3aed;
-  --accent-dim: rgba(109, 40, 217, 0.1);
+:root[data-mode='light'][data-theme='yellow'] {
+  --accent: #8e7306;
+  --accent-hover: #b08f07;
+  --accent-dim: rgba(142, 115, 6, 0.1);
 }
 :root[data-mode='light'][data-theme='lime'] {
-  --accent: #4d7c0f;
-  --accent-hover: #65a30d;
-  --accent-dim: rgba(77, 124, 15, 0.1);
+  --accent: #52820a;
+  --accent-hover: #67a30d;
+  --accent-dim: rgba(82, 130, 10, 0.1);
 }
-:root[data-mode='light'][data-theme='red'] {
-  --accent: #b91c1c;
-  --accent-hover: #dc2626;
-  --accent-dim: rgba(185, 28, 28, 0.1);
+:root[data-mode='light'][data-theme='green'] {
+  --accent: #108410;
+  --accent-hover: #14a414;
+  --accent-dim: rgba(16, 132, 16, 0.1);
+}
+:root[data-mode='light'][data-theme='emerald'] {
+  --accent: #0c8665;
+  --accent-hover: #0fa77e;
+  --accent-dim: rgba(12, 134, 101, 0.1);
+}
+:root[data-mode='light'][data-theme='teal'] {
+  --accent: #0c8286;
+  --accent-hover: #0fa2a7;
+  --accent-dim: rgba(12, 130, 134, 0.1);
+}
+:root[data-mode='light'][data-theme='ocean'] {
+  --accent: #0977ae;
+  --accent-hover: #0b8ed0;
+  --accent-dim: rgba(9, 119, 174, 0.1);
+}
+:root[data-mode='light'][data-theme='blue'] {
+  --accent: #083a91;
+  --accent-hover: #0a48b3;
+  --accent-dim: rgba(8, 58, 145, 0.1);
 }
 :root[data-mode='light'][data-theme='indigo'] {
-  --accent: #4338ca;
-  --accent-hover: #4f46e5;
-  --accent-dim: rgba(67, 56, 202, 0.1);
+  --accent: #0f1bc7;
+  --accent-hover: #1220e8;
+  --accent-dim: rgba(15, 27, 199, 0.1);
+}
+:root[data-mode='light'][data-theme='violet'] {
+  --accent: #350a99;
+  --accent-hover: #410cbb;
+  --accent-dim: rgba(53, 10, 153, 0.1);
+}
+:root[data-mode='light'][data-theme='purple'] {
+  --accent: #7d0ebe;
+  --accent-hover: #9310df;
+  --accent-dim: rgba(125, 14, 190, 0.1);
+}
+:root[data-mode='light'][data-theme='fuchsia'] {
+  --accent: #900990;
+  --accent-hover: #b20bb2;
+  --accent-dim: rgba(144, 9, 144, 0.1);
+}
+:root[data-mode='light'][data-theme='sakura'] {
+  --accent: #b60c7d;
+  --accent-hover: #d70e94;
+  --accent-dim: rgba(182, 12, 125, 0.1);
+}
+:root[data-mode='light'][data-theme='rose'] {
+  --accent: #990a3a;
+  --accent-hover: #bb0c47;
+  --accent-dim: rgba(153, 10, 58, 0.1);
 }
 
 * {
@@ -202,8 +237,50 @@ body {
 .titlebar-brand {
   display: flex;
   align-items: center;
-  gap: 10px;
   min-width: 0;
+  /* With a long custom title the brand must be the part that shrinks; the window
+     buttons keep their fixed width. */
+  flex: 0 1 auto;
+  overflow: hidden;
+}
+
+/*
+ * Collapsing wrapper around the logo.
+ *
+ * Keeping the logo mounted and animating this slot is what makes hiding it feel
+ * intentional: width, gap and opacity all close together, and the logo scales down
+ * toward its own centre instead of being clipped by the strip edge. The gap lives
+ * here (not on `.titlebar-brand`'s `gap`) so it disappears with the icon.
+ */
+.titlebar-logo-slot {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 22px;
+  margin-right: 10px;
+  overflow: hidden;
+  transform-origin: center;
+  transition:
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s ease,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.titlebar-logo-slot.is-hidden {
+  width: 0;
+  margin-right: 0;
+  opacity: 0;
+  transform: scale(0.5);
+}
+
+/* Collapsing is decorative: skip it for users who asked for reduced motion. */
+@media (prefers-reduced-motion: reduce) {
+  .titlebar-logo-slot,
+  .titlebar-logo {
+    transition: none;
+  }
 }
 
 /* The supplied logo is a white silhouette; use it as a CSS mask so it can be
@@ -229,6 +306,12 @@ body {
   font-weight: 600;
   letter-spacing: 0.4px;
   color: var(--titlebar-text);
+  transition: color 0.2s;
+  /* A user-supplied title can be arbitrarily long: ellipsise it instead of letting
+     it push the window buttons or overflow the strip. */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .titlebar-controls {
@@ -236,6 +319,10 @@ body {
   align-items: stretch;
   height: 100%;
   -webkit-app-region: no-drag;
+  /* Pinned to the right edge even when the brand block is gone, so an empty title
+     bar looks deliberate rather than broken. */
+  margin-left: auto;
+  flex-shrink: 0;
 }
 
 .titlebar-btn {
@@ -1269,6 +1356,20 @@ body {
   height: 18px;
 }
 
+/* English name, appended to the Chinese title after a Chinese search. Kept inline
+   and muted so it reads as a gloss (the English title is what the APIs index, so
+   it stays available for cross-checking). */
+.resource-title-en {
+  margin-left: 6px;
+  font-weight: 500;
+  color: var(--text-muted);
+}
+
+.resource-title-en::before {
+  content: '· ';
+  color: var(--text-dim);
+}
+
 .resource-desc {
   font-size: 12px;
   color: var(--text-muted);
@@ -1796,47 +1897,81 @@ body {
 }
 
 /* ---------- Color themes ---------- */
-:root[data-theme='emerald'] {
-  --accent: #22d3a5;
-  --accent-hover: #2ee6b7;
-  --accent-dim: rgba(34, 211, 165, 0.14);
-}
-:root[data-theme='ocean'] {
-  --accent: #38bdf8;
-  --accent-hover: #7dd3fc;
-  --accent-dim: rgba(56, 189, 248, 0.15);
+:root[data-theme='red'] {
+  --accent: #eb1414;
+  --accent-hover: #ee3a3a;
+  --accent-dim: rgba(235, 20, 20, 0.15);
 }
 :root[data-theme='sunset'] {
-  --accent: #f97316;
-  --accent-hover: #fb923c;
-  --accent-dim: rgba(249, 115, 22, 0.15);
+  --accent: #f68331;
+  --accent-hover: #f89b58;
+  --accent-dim: rgba(246, 131, 49, 0.15);
 }
-:root[data-theme='sakura'] {
-  --accent: #ec4899;
-  --accent-hover: #f472b6;
-  --accent-dim: rgba(236, 72, 153, 0.15);
-}
-:root[data-theme='violet'] {
-  --accent: #8b5cf6;
-  --accent-hover: #a78bfa;
-  --accent-dim: rgba(139, 92, 246, 0.15);
+:root[data-theme='yellow'] {
+  --accent: #d3ab0d;
+  --accent-hover: #f1c518;
+  --accent-dim: rgba(211, 171, 13, 0.15);
 }
 :root[data-theme='lime'] {
-  --accent: #84cc16;
-  --accent-hover: #a3e635;
-  --accent-dim: rgba(132, 204, 22, 0.15);
+  --accent: #93e01f;
+  --accent-hover: #a4e543;
+  --accent-dim: rgba(147, 224, 31, 0.15);
 }
-:root[data-theme='red'] {
-  --accent: #ef4444;
-  --accent-hover: #f87171;
-  --accent-dim: rgba(239, 68, 68, 0.15);
+:root[data-theme='green'] {
+  --accent: #2bb62b;
+  --accent-hover: #39d039;
+  --accent-dim: rgba(43, 182, 43, 0.15);
+}
+:root[data-theme='emerald'] {
+  --accent: #1ce3ae;
+  --accent-hover: #40e7bb;
+  --accent-dim: rgba(28, 227, 174, 0.15);
+}
+:root[data-theme='teal'] {
+  --accent: #19c2c8;
+  --accent-hover: #26dde4;
+  --accent-dim: rgba(25, 194, 200, 0.15);
+}
+:root[data-theme='ocean'] {
+  --accent: #2cb0f2;
+  --accent-hover: #52bef4;
+  --accent-dim: rgba(44, 176, 242, 0.15);
+}
+:root[data-theme='blue'] {
+  --accent: #0f53c7;
+  --accent-hover: #1263ed;
+  --accent-dim: rgba(15, 83, 199, 0.15);
 }
 :root[data-theme='indigo'] {
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-dim: rgba(129, 140, 248, 0.15);
+  --accent: #434fef;
+  --accent-hover: #6972f2;
+  --accent-dim: rgba(67, 79, 239, 0.15);
 }
-
+:root[data-theme='violet'] {
+  --accent: #4f11df;
+  --accent-hover: #652aef;
+  --accent-dim: rgba(79, 17, 223, 0.15);
+}
+:root[data-theme='purple'] {
+  --accent: #b44def;
+  --accent-hover: #c472f2;
+  --accent-dim: rgba(180, 77, 239, 0.15);
+}
+:root[data-theme='fuchsia'] {
+  --accent: #ed12ed;
+  --accent-hover: #f038f0;
+  --accent-dim: rgba(237, 18, 237, 0.15);
+}
+:root[data-theme='sakura'] {
+  --accent: #ee3ab2;
+  --accent-hover: #f160c1;
+  --accent-dim: rgba(238, 58, 178, 0.15);
+}
+:root[data-theme='rose'] {
+  --accent: #da1054;
+  --accent-hover: #ef2468;
+  --accent-dim: rgba(218, 16, 84, 0.15);
+}
 /* ---------- Custom background ---------- */
 .app-background {
   position: fixed;
@@ -2332,6 +2467,166 @@ body {
 :root[data-mode='light'] .theme-swatch {
   box-shadow: inset 0 0 0 3px rgba(20, 28, 45, 0.08);
 }
+
+/* ---- Title bar option previews ----
+   Miniatures of the actual strip, so "default" and "custom" read at a glance
+   instead of needing the label. Widths are fixed to keep both cards aligned. */
+.tb-preview {
+  display: flex;
+  align-items: center;
+  height: 34px;
+  padding: 0 8px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--titlebar-bg);
+}
+
+/* Same silhouette as the real logo, tinted by the same token.
+   NOTE: the mask image is set inline from JSX — a `url()` here would resolve
+   relative to the emitted stylesheet (`assets/`) and 404. */
+.tb-preview-mark {
+  width: 10px;
+  height: 12px;
+  flex-shrink: 0;
+  background: var(--titlebar-mark);
+  -webkit-mask-size: contain;
+  mask-size: contain;
+  -webkit-mask-position: center;
+  mask-position: center;
+  -webkit-mask-repeat: no-repeat;
+  mask-repeat: no-repeat;
+}
+
+/* Collapsing counterpart of `.titlebar-logo-slot`, so the preview reacts to the
+   icon toggle exactly like the real bar does. */
+.tb-preview-slot {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 10px;
+  height: 12px;
+  margin-right: 7px;
+  overflow: hidden;
+  transition:
+    width 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    margin-right 0.28s cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 0.18s ease,
+    transform 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tb-preview-slot.is-hidden {
+  width: 0;
+  margin-right: 0;
+  opacity: 0;
+  transform: scale(0.5);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .tb-preview-slot,
+  .switch,
+  .switch::after {
+    transition: none;
+  }
+}
+
+.tb-preview-text {
+  min-width: 0;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--titlebar-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Window buttons hint, pushed to the right edge of the miniature. */
+.tb-preview-btns {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  flex-shrink: 0;
+}
+
+.tb-preview-btns i {
+  width: 4px;
+  height: 1px;
+  background: var(--titlebar-text);
+  opacity: 0.45;
+}
+
+/* ---- Switch (used by the title bar icon toggle) ----
+   A real <button role="switch"> so it is keyboard-reachable and screen readers
+   announce the on/off state, styled as a track + knob. */
+.switch {
+  position: relative;
+  flex: none;
+  width: 44px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  background: var(--surface-2);
+  cursor: pointer;
+  transition: background 0.18s, border-color 0.18s;
+}
+
+.switch::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--text-muted);
+  transition:
+    transform 0.24s cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.18s;
+}
+
+.switch:hover {
+  border-color: var(--accent);
+}
+
+.switch.on {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+}
+
+.switch.on::after {
+  transform: translateX(20px);
+  background: var(--accent);
+}
+
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Row layout: toggle on the left, label + explanation on the right. */
+.switch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  max-width: 520px;
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.switch-row-text {
+  min-width: 0;
+}
+
+.switch-row-title {
+  font-size: 13px;
+  font-weight: 600;
+  margin-bottom: 3px;
+}
+
 
 /* Some version icons (e.g. the near-white wool used for Fabric) fill their whole
    viewBox, so the tile fill is hidden — a stronger outline keeps them readable
@@ -2855,6 +3150,7 @@ body {
   overflow: hidden;
 }
 
+
 .slatt-skin-thumb .skin-head {
   border-radius: 8px;
 }
@@ -2891,6 +3187,17 @@ body {
 .slatt-skin-card .badge {
   padding: 1px 7px;
   font-size: 10px;
+}
+
+/*
+ * "128x" badge on skins the game cannot render. Sits in the meta row next to the
+ * arm-width badge rather than over the thumbnail — an overlay covered the face,
+ * which is the one part of the skin people look at.
+ */
+.slatt-skin-hd-badge {
+  background: rgba(240, 180, 41, 0.14);
+  border-color: var(--warning);
+  color: var(--warning);
 }
 
 /* skeleton */
@@ -2987,12 +3294,30 @@ body {
   border-radius: 10px;
   background: var(--accent-dim);
   color: var(--accent);
+  /* The brand images are square-ish and fill the tile, so clip them to the
+     rounded corners instead of letting them poke out. */
+  overflow: hidden;
 }
 
 .slatt-link-icon svg {
   width: 17px;
   height: 17px;
 }
+
+/*
+ * Brand artwork (site / author / team) replacing the old line icons. `cover` trims
+ * the odd 2-4px of aspect mismatch (the team avatar is 128x124) rather than
+ * squashing it, and `display: block` kills the inline-image baseline gap that would
+ * otherwise shift the tile off-centre.
+ */
+.slatt-link-icon img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  pointer-events: none;
+}
+
 
 .slatt-link-text {
   display: flex;
@@ -3520,6 +3845,185 @@ body {
   border-style: solid;
   border-color: var(--accent);
   color: var(--accent);
+}
+
+/* ---------- Resource dependency panel (前置模组) ----------
+   A mod with an unmet prerequisite does not fail loudly — it crashes on launch with
+   no hint about what is missing. This panel therefore uses the warning colour, not
+   a neutral one, and only when something is actually required. */
+.dep-panel {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+}
+
+.dep-panel.has-required {
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 8%, var(--surface));
+}
+
+/* color-mix is not available in very old Chromium; the plain background above is
+   still readable, so this is a progressive enhancement only. */
+
+.dep-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.dep-panel-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.dep-panel.has-required .dep-panel-title {
+  color: var(--warning);
+}
+
+/* Plain count next to the panel title. */
+.dep-count-badge {
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.dep-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.dep-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--card);
+  /*
+   * A slim left bar marks the row as a prerequisite. It costs no horizontal space
+   * and reads as a state indicator rather than a stray bullet, which is why the
+   * earlier dot was dropped.
+   */
+  border-left-width: 3px;
+  border-left-style: solid;
+  border-left-color: var(--warning);
+}
+
+/* Already on disk: dimmed, and the bar turns green so the row reads as "done". */
+.dep-row.installed {
+  opacity: 0.62;
+  border-left-color: var(--accent);
+}
+
+/* "已安装 X · 将替换为下方所选版本" — states what is on disk before you act. */
+.dep-installed-note {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.dep-main {
+  flex: 1;
+  min-width: 0;
+}
+
+.dep-name {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dep-sub {
+  margin-top: 2px;
+  font-size: 11px;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dep-sub.missing {
+  color: var(--danger);
+}
+
+.dep-state {
+  flex: none;
+  font-size: 11px;
+  color: var(--accent);
+}
+
+.dep-panel-hint {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--warning);
+}
+
+.dep-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 10px;
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.dep-auto-row:hover {
+  color: var(--text);
+}
+
+.dep-auto-row input[type='checkbox'] {
+  accent-color: var(--accent);
+  margin: 0;
+  cursor: pointer;
+}
+
+/*
+ * Version picker inside a dependency row.
+ *
+ * Sized to sit on the row's second line exactly where the plain version text used
+ * to be, so switching between "one candidate" (text) and "several" (dropdown) does
+ * not change the row height.
+ */
+.dep-version-pick {
+  margin-top: 3px;
+  max-width: 340px;
+}
+
+.dep-version-select {
+  width: 100%;
+  padding: 3px 8px;
+  font-size: 11px;
+  line-height: 16px;
+  border-radius: 6px;
+  color: var(--text-muted);
+}
+
+.dep-version-select:hover:not(:disabled) {
+  color: var(--text);
+}
+
+/* "前置 N" marker on a version card, so the count is visible before picking. */
+.version-card-dep-badge {
+  align-self: flex-start;
+  font-size: 10px;
+  padding: 1px 6px;
+}
+
+.version-card-dep-badge.is-none {
+  opacity: 0.5;
 }
 
 /* ---------- Download manager ---------- */

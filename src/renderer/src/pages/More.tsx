@@ -4,7 +4,7 @@ import { notify } from '../lib/toast';
 import { ipcErrorMessage } from '../lib/ipcError';
 import { getSlattSession, isSlattReady, setSlattSession, subscribeSlatt } from '../lib/slatt';
 import SkinHead from '../components/SkinHead';
-import { loadSkinPngUrl } from '../lib/skinImage';
+import { isSupportedSkinSize, measureSkinSize, type SkinSize } from '../lib/skinSize';
 
 /**
  * 「更多」页 —— SLATT 团队站点（slatt.cn）集成。
@@ -41,6 +41,14 @@ export default function More(): JSX.Element {
   const [skins, setSkins] = useState<SlattSkin[]>([]);
   const [skinsLoading, setSkinsLoading] = useState(false);
   const [skinsError, setSkinsError] = useState('');
+  /**
+   * Skin id -> natural pixel size.
+   *
+   * Minecraft only renders 64×64 / 64×32, but the library also holds 128×128 HD
+   * skins. Those can only be saved to disk, so every card needs its size known up
+   * front — measured once per skin (the blob is already cached by the thumbnails).
+   */
+  const [skinSizes, setSkinSizes] = useState<Record<number, SkinSize | null>>({});
 
   /** The skin pending installation; non-null opens the account picker. */
   const [pendingSkin, setPendingSkin] = useState<SlattSkin | null>(null);
@@ -89,6 +97,27 @@ export default function More(): JSX.Element {
     }
     void loadSkins();
   }, [session, loadSkins]);
+
+  // Measure every skin once, so the cards can flag unsupported sizes and the
+  // install dialog can block the account path before the user clicks anything.
+  useEffect(() => {
+    if (skins.length === 0) return;
+    let cancelled = false;
+    void (async () => {
+      const entries = await Promise.all(
+        skins.map(async (skin) => [skin.id, await measureSkinSize(skin.skinUrl)] as const),
+      );
+      if (cancelled) return;
+      setSkinSizes((prev) => {
+        const next = { ...prev };
+        for (const [id, size] of entries) next[id] = size;
+        return next;
+      });
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [skins]);
 
   async function signIn(): Promise<void> {
     if (signingIn) return;
@@ -274,33 +303,47 @@ export default function More(): JSX.Element {
 
               {skins.length > 0 && (
                 <div className="slatt-skin-grid">
-                  {skins.map((skin, i) => (
-                    <div
-                      className="slatt-skin-card"
-                      key={skin.id}
-                      style={{ animationDelay: `${Math.min(i, 12) * 40}ms` }}
-                    >
-                      <span className="slatt-skin-thumb">
-                        <SkinHead skin={skin.skinUrl} size={64} />
-                      </span>
-                      <div className="slatt-skin-name" title={skin.name}>
-                        {skin.name}
-                      </div>
-                      <div className="slatt-skin-meta">
-                        {skin.uploaderName && (
-                          <span className="slatt-skin-by" title={skin.uploaderName}>
-                            by {skin.uploaderName}
-                          </span>
-                        )}
-                        <span className={`badge${skin.model === 'slim' ? ' badge-blue' : ''}`}>
-                          {MODEL_LABEL[skin.model]}
+                  {skins.map((skin, i) => {
+                    const size = skinSizes[skin.id];
+                    // `null`/undefined means "could not measure" — treated as usable,
+                    // since the backend validates again before writing anything.
+                    const hd = size != null && !isSupportedSkinSize(size.width, size.height);
+                    return (
+                      <div
+                        className="slatt-skin-card"
+                        key={skin.id}
+                        style={{ animationDelay: `${Math.min(i, 12) * 40}ms` }}
+                      >
+                        <span className="slatt-skin-thumb">
+                          <SkinHead skin={skin.skinUrl} size={64} />
                         </span>
+                        <div className="slatt-skin-name" title={skin.name}>
+                          {skin.name}
+                        </div>
+                        <div className="slatt-skin-meta">
+                          {skin.uploaderName && (
+                            <span className="slatt-skin-by" title={skin.uploaderName}>
+                              by {skin.uploaderName}
+                            </span>
+                          )}
+                          <span className={`badge${skin.model === 'slim' ? ' badge-blue' : ''}`}>
+                            {MODEL_LABEL[skin.model]}
+                          </span>
+                          {hd && size && (
+                            <span
+                              className="badge slatt-skin-hd-badge"
+                              title={`这款皮肤是 ${size.width}×${size.height}，Minecraft 只接受 64×64 或 64×32，无法安装到账户`}
+                            >
+                              {size.width}x
+                            </span>
+                          )}
+                        </div>
+                        <button className="btn btn-sm btn-block" onClick={() => setPendingSkin(skin)}>
+                          安装
+                        </button>
                       </div>
-                      <button className="btn btn-sm btn-block" onClick={() => setPendingSkin(skin)}>
-                        安装
-                      </button>
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               )}
             </div>
@@ -314,10 +357,7 @@ export default function More(): JSX.Element {
         <div className="slatt-links">
           <button className="slatt-link" onClick={() => void window.slcl.openExternal(SITE_URL)}>
             <span className="slatt-link-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <circle cx="12" cy="12" r="9" />
-                <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" />
-              </svg>
+              <img src="slatt-site.png" alt="" />
             </span>
             <span className="slatt-link-text">
               <span className="slatt-link-title">SLATT 团队官网</span>
@@ -330,9 +370,7 @@ export default function More(): JSX.Element {
 
           <button className="slatt-link" onClick={() => void window.slcl.openExternal(AUTHOR_URL)}>
             <span className="slatt-link-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M16 7a4 4 0 1 1-8 0 4 4 0 0 1 8 0zM4 21v-1a6 6 0 0 1 6-6h4a6 6 0 0 1 6 6v1" />
-              </svg>
+              <img src="slatt-author.png" alt="" />
             </span>
             <span className="slatt-link-text">
               <span className="slatt-link-title">作者</span>
@@ -345,9 +383,7 @@ export default function More(): JSX.Element {
 
           <button className="slatt-link" onClick={() => void window.slcl.openExternal(TEAM_URL)}>
             <span className="slatt-link-icon" aria-hidden="true">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M17 20v-2a4 4 0 0 0-4-4H7a4 4 0 0 0-4 4v2M10 10a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7zM21 20v-2a4 4 0 0 0-3-3.87M16.5 3.3a3.5 3.5 0 0 1 0 6.8" />
-              </svg>
+              <img src="slatt-team.png" alt="" />
             </span>
             <span className="slatt-link-text">
               <span className="slatt-link-title">鸣谢 SLATT团队</span>
@@ -379,6 +415,7 @@ export default function More(): JSX.Element {
       {pendingSkin && (
         <SkinTargetDialog
           skin={pendingSkin}
+          size={skinSizes[pendingSkin.id] ?? null}
           onClose={() => setPendingSkin(null)}
           onDone={() => setPendingSkin(null)}
         />
@@ -393,44 +430,39 @@ export default function More(): JSX.Element {
  * 两种模式共用一个弹窗，因为它们是同一个动作的两种落点；把「下载到文件夹」
  * 做成独立入口会让用户以为它是另一项功能。
  * 默认选中启动器当前账户 —— 绝大多数情况下用户只想改自己正在用的那个。
+ *
+ * 尺寸不支持（128×128 等）的皮肤只剩「保存到文件夹」一条路：Minecraft 客户端
+ * 只认 64×64 / 64×32，既传不上正版，离线启动也不会生效，所以账户模式直接禁用。
  */
 function SkinTargetDialog({
   skin,
+  size,
   onClose,
   onDone,
 }: {
   skin: SlattSkin;
+  /** Natural pixel size, measured by the library before opening this dialog. */
+  size: SkinSize | null;
   onClose: () => void;
   onDone: () => void;
 }): JSX.Element {
-  const [mode, setMode] = useState<'account' | 'folder'>('account');
+  /**
+   * Only an explicitly measured unsupported size counts. `null` (not measured yet,
+   * or the image failed to load) keeps the old behaviour — the backend validates
+   * again before writing, so nothing invalid can slip through.
+   */
+  const unsupported = size !== null && !isSupportedSkinSize(size.width, size.height);
+  const [mode, setMode] = useState<'account' | 'folder'>(unsupported ? 'folder' : 'account');
   const [accounts, setAccounts] = useState<AccountProfile[] | null>(null);
   const [targetId, setTargetId] = useState('');
   const [folder, setFolder] = useState('');
   const [applying, setApplying] = useState(false);
-  /** Natural pixel size of this skin, used to warn about unsupported HD sizes. */
-  const [skinSize, setSkinSize] = useState<{ width: number; height: number } | null>(null);
 
-  // Read the real PNG dimensions so the dialog can warn *before* the user commits:
-  // Mojang only accepts 64x64 / 64x32, and the library contains 128x128 skins.
+  // The library may still be measuring when the dialog opens; a late result must
+  // not leave the account tab selected for a skin that cannot be installed.
   useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const url = await loadSkinPngUrl(skin.skinUrl);
-        const img = new Image();
-        img.onload = (): void => {
-          if (!cancelled) setSkinSize({ width: img.naturalWidth, height: img.naturalHeight });
-        };
-        img.src = url;
-      } catch {
-        /* size stays null; the backend still validates on upload */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [skin.skinUrl]);
+    if (unsupported) setMode('folder');
+  }, [unsupported]);
 
   useEffect(() => {
     let cancelled = false;
@@ -519,14 +551,6 @@ function SkinTargetDialog({
 
   const canSubmit = mode === 'account' ? Boolean(targetId) : Boolean(folder);
 
-  /**
-   * Mojang rejects anything but 64x64 / 64x32. Warn as soon as a Microsoft account
-   * is selected, so the user isn't surprised after clicking 安装.
-   */
-  const selectedAccount = accounts?.find((a) => a.id === targetId);
-  const hdSkin = skinSize !== null && !(skinSize.width === 64 && (skinSize.height === 64 || skinSize.height === 32));
-  const hdBlocksUpload = mode === 'account' && selectedAccount?.type === 'microsoft' && hdSkin;
-
   return (
     <div className="modal-backdrop" role="presentation" onClick={() => !applying && onClose()}>
       <div
@@ -557,7 +581,8 @@ function SkinTargetDialog({
             aria-selected={mode === 'account'}
             className={`slatt-mode${mode === 'account' ? ' active' : ''}`}
             onClick={() => setMode('account')}
-            disabled={applying}
+            disabled={applying || unsupported}
+            title={unsupported ? '这款皮肤尺寸不受支持，只能保存到文件夹' : undefined}
           >
             应用到账户
           </button>
@@ -571,6 +596,16 @@ function SkinTargetDialog({
             保存到文件夹
           </button>
         </div>
+
+        {/* Unsupported size: the only remaining action is saving the file, so say so
+            instead of showing an account picker that cannot succeed. */}
+        {unsupported && size && (
+          <div className="slatt-warn">
+            <strong>这款皮肤无法安装到账户。</strong>
+            Minecraft 客户端只接受 64×64 或 64×32 的皮肤，而这款是 {size.width}×{size.height}。
+            它既无法上传到正版账号，也无法用于离线启动，只能保存到本地文件夹。
+          </div>
+        )}
 
         {mode === 'account' ? (
           <>
@@ -607,14 +642,6 @@ function SkinTargetDialog({
               正版账户会上传到 Minecraft 官方账号，重新进入游戏后生效；离线账户直接作为游戏皮肤。
               上传正版皮肤需要有效的登录状态，令牌过期时请先重新登录。
             </p>
-
-            {hdBlocksUpload && skinSize && (
-              <div className="slatt-warn">
-                <strong>这款皮肤无法上传到正版账号。</strong>
-                Minecraft 官方只接受 64×64 或 64×32 的皮肤，而这款是 {skinSize.width}×{skinSize.height}。
-                继续安装只会更换启动器内的预览；想真正改掉正版皮肤，请换用标准尺寸的皮肤。
-              </div>
-            )}
           </>
         ) : (
           <>

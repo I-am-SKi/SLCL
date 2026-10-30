@@ -1,19 +1,36 @@
 import { launch } from '@xmcl/core';
 import type { ChildProcess } from 'child_process';
 import type { CrashInfo, DownloadProgress, GameOutput, LaunchConfig } from '@shared/types';
-import { resolveLaunchUser } from '../auth';
+import { getLocalSkinForLaunch, resolveLaunchUser } from '../auth';
 import { getSettings } from '../settings/store';
 import { getMinecraftVersionOf, getRequiredJavaMajor, getVersionGameDir, getVersionResourceRoot, repairVersion } from '../versions';
 import { detectJava, pickBestJava, readJavaInfo } from '../java/detector';
 import { authlibInjectorArgs, ensureAuthlibInjector } from './authlibInjector';
+import { startLocalSkinServer, type LocalSkinServer } from './skinServer';
 import { ensureGameOptions } from './gameOptions';
 import { beginSession, clearSession, endSession, recordOutput, recordSpawnError } from './crash';
 
 let currentProcess: ChildProcess | null = null;
 /** Set when the user asked to stop the game, so the exit is not reported as a crash. */
 let killRequested = false;
+/**
+ * Loopback Yggdrasil server serving the offline account's skin. Lives only as long
+ * as the game does.
+ */
+let skinServer: LocalSkinServer | null = null;
 /** Exit code reported when the process could not be spawned at all. */
 const SPAWN_FAILED_CODE = -1;
+
+/** Stop the loopback skin server, if one is running. */
+function stopSkinServer(): void {
+  if (!skinServer) return;
+  try {
+    skinServer.close();
+  } catch {
+    /* already closed */
+  }
+  skinServer = null;
+}
 
 export function isRunning(): boolean {
   return currentProcess !== null && !currentProcess.killed;
@@ -104,10 +121,18 @@ export async function startGame(
   }
 
   const launchUser = await resolveLaunchUser(config.accountId);
+  const accountType = settings.accounts.find((a) => a.id === config.accountId)?.type;
   const extraJVMArgs = config.jvmArgs ? config.jvmArgs.split(/\s+/).filter(Boolean) : [];
 
-  // Third-party auth (LittleSkin) needs authlib-injector so the client talks to
-  // its Yggdrasil server instead of Mojang's sessionserver.
+  // Skins come from one of two places:
+  //
+  //   - LittleSkin accounts: authlib-injector pointed at LittleSkin's Yggdrasil, so
+  //     the client resolves skins from that server.
+  //   - Offline accounts: no session server exists at all, so the client would show
+  //     Steve. We run a loopback Yggdrasil server that answers the profile lookup
+  //     with the skin the user picked, and point authlib-injector at it.
+  //
+  // Microsoft accounts need neither: their skin is on Mojang's servers already.
   if (launchUser.authlibInjector) {
     try {
       const jar = await ensureAuthlibInjector();
@@ -117,27 +142,61 @@ export async function startGame(
       const reason = e instanceof Error ? e.message : String(e);
       onOutput({ type: 'error', text: `[SLCL] 警告:${reason}。本次将以无 LittleSkin 皮肤的模式启动。` });
     }
+  } else if (accountType === 'offline') {
+    // Offline accounts only. A Microsoft account's skin is already on Mojang's
+    // servers, and worse, injecting authlib-injector there would redirect its
+    // session-server calls too — breaking online-mode multiplayer logins. A
+    // leftover local skin file (from a failed upload) must not trigger that.
+    const localSkin = getLocalSkinForLaunch(config.accountId);
+    if (localSkin) {
+      try {
+        skinServer = await startLocalSkinServer({
+          uuid: launchUser.uuid,
+          name: launchUser.name,
+          png: localSkin.png,
+          variant: localSkin.variant,
+        });
+        const jar = await ensureAuthlibInjector();
+        extraJVMArgs.push(
+          `-Dauthlibinjector.yggdrasil.prefetched=${skinServer.prefetchedMetadata}`,
+        );
+        extraJVMArgs.push(...authlibInjectorArgs(jar, skinServer.apiRoot));
+      } catch (e) {
+        // A missing skin must never stop the game from starting.
+        stopSkinServer();
+        const reason = e instanceof Error ? e.message : String(e);
+        onOutput({ type: 'error', text: `[SLCL] 警告:${reason}。本次将以默认皮肤启动。` });
+      }
+    }
   }
 
-  const proc = await launch({
-    gamePath,
-    resourcePath,
-    javaPath,
-    version: config.version,
-    gameProfile: { id: launchUser.uuid, name: launchUser.name },
-    accessToken: launchUser.accessToken,
-    ...(launchUser.userType === 'legacy' ? { userType: 'legacy' as const } : {}),
-    maxMemory,
-    minMemory,
-    resolution: {
-      width: config.resolution.width,
-      height: config.resolution.height,
-      fullscreen: config.fullscreen,
-    },
-    extraJVMArgs,
-    launcherName: 'SLCL',
-    launcherBrand: 'SLATT Client',
-  });
+  let proc: ChildProcess;
+  try {
+    proc = await launch({
+      gamePath,
+      resourcePath,
+      javaPath,
+      version: config.version,
+      gameProfile: { id: launchUser.uuid, name: launchUser.name },
+      accessToken: launchUser.accessToken,
+      ...(launchUser.userType === 'legacy' ? { userType: 'legacy' as const } : {}),
+      maxMemory,
+      minMemory,
+      resolution: {
+        width: config.resolution.width,
+        height: config.resolution.height,
+        fullscreen: config.fullscreen,
+      },
+      extraJVMArgs,
+      launcherName: 'SLCL',
+      launcherBrand: 'SLATT Client',
+    });
+  } catch (e) {
+    // `launch()` can throw before any process exists (bad classpath, missing jar).
+    // Without this the skin server would stay bound to its port forever.
+    stopSkinServer();
+    throw e;
+  }
 
   // Start recording *after* the process exists, but before any output arrives.
   // The crash detector needs the launch wall-clock time to find the matching
@@ -174,6 +233,7 @@ export async function startGame(
     recordSpawnError(e.message);
     emit({ type: 'error', text: e.message });
     currentProcess = null;
+    stopSkinServer();
     if (killRequested) {
       killRequested = false;
       clearSession();
@@ -185,6 +245,8 @@ export async function startGame(
   });
   proc.on('exit', (code) => {
     currentProcess = null;
+    // The game is gone, so nothing can query the loopback server any more.
+    stopSkinServer();
     emit({ type: 'exit', code: code ?? 0 });
     // A user-initiated stop is not a crash, whatever exit code Windows reports.
     if (killRequested) {
@@ -205,6 +267,7 @@ export function killGame(): void {
       /* ignore */
     }
     currentProcess = null;
+    stopSkinServer();
     clearSession();
   }
 }

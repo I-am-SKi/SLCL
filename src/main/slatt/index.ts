@@ -3,7 +3,8 @@
  *
  * Scope: this is a **team-members-only** feature. Accounts on slatt.cn can only be
  * created by SLATT team members, so a successful login implies membership; the
- * `group_id` is still kept to distinguish member / admin / owner in the UI.
+ * `group_id` is still kept to distinguish super_admin / captain / tech / member
+ * in the UI.
  *
  * Endpoints (see 对接包 SLATT启动器SSO与皮肤API说明.md):
  *
@@ -28,7 +29,7 @@ import { writeFile } from 'fs/promises';
 import { join } from 'path';
 import { randomUUID } from 'crypto';
 import type { SlattApplyResult, SlattRole, SlattSession, SlattSkin, SlattUser } from '@shared/types';
-import { isUploadableSkinSize, pngDimensions, setLocalSkin, uploadSkin } from '../auth';
+import { setLocalSkin, skinSizeProblem, uploadSkin } from '../auth';
 import { getSettings } from '../settings/store';
 import { userAgent } from '../ua';
 
@@ -42,30 +43,40 @@ const LIBRARY_TTL_MS = 60_000;
 /**
  * Role labels, keyed by the site's `group_id`.
  *
- * `captain` is the group the site actually returns for the team lead account
- * (e.g. the project author), so it must be mapped explicitly — otherwise the
- * badge silently degrades to the default "团队成员".
+ * This mapping is authoritative — it mirrors the permission groups in the site's
+ * admin panel:
+ *
+ *   | 权限组名称   | group_id      |
+ *   | 超级管理员   | super_admin   |
+ *   | 主管         | captain       |
+ *   | 技术部成员   | tech          |
+ *   | SLATT 成员   | member        |
+ *
+ * Any other `group_id` (including a missing one) is an ordinary team member: the
+ * site can add groups before the launcher knows about them, and showing no badge
+ * at all would be worse than showing the default one.
+ *
+ * The labels already carry the "SLATT团队" prefix — call sites must not prefix
+ * them again.
  */
 const ROLE_LABEL: Record<SlattRole, string> = {
-  member: '团队成员',
-  captain: '团队主管',
-  admin: '团队管理员',
-  owner: '团队主管',
-  unknown: '团队成员',
+  super_admin: 'SLATT团队超级管理员',
+  captain: 'SLATT团队主管',
+  tech: 'SLATT团队技术部成员',
+  member: 'SLATT团队成员',
 };
 
 function roleOf(groupId: string | null | undefined): SlattRole {
-  switch ((groupId ?? '').toLowerCase()) {
-    case 'member':
-      return 'member';
+  switch ((groupId ?? '').trim().toLowerCase()) {
+    case 'super_admin':
+      return 'super_admin';
     case 'captain':
       return 'captain';
-    case 'admin':
-      return 'admin';
-    case 'owner':
-      return 'owner';
+    case 'tech':
+      return 'tech';
     default:
-      return 'unknown';
+      // 'member' explicitly, plus every group_id this build does not know.
+      return 'member';
   }
 }
 
@@ -509,24 +520,37 @@ export async function applySkin(accountId: string, skinId: number): Promise<Slat
   const { skin, buf } = await fetchSkinPng(skinId);
   const pngBase64 = buf.toString('base64');
 
-  if (account.type === 'microsoft') {
-    // Mojang only accepts 64x64 / 64x32 skins. HD skins (128x128) are common in
-    // the team library, so refuse the upload up front and keep the local preview
-    // rather than letting the server answer with an opaque error.
-    const dims = pngDimensions(buf);
-    const uploadable = isUploadableSkinSize(buf);
-    if (!uploadable) {
-      setLocalSkin(accountId, pngBase64);
-      const size = dims ? `${dims.width}×${dims.height}` : '未知尺寸';
+  // A LittleSkin account's skin is owned by LittleSkin and resolved through its
+  // Yggdrasil texture server, so a local file would neither show in the launcher
+  // (the preview reads the online skin) nor reach the game. Point the user at the
+  // place where the change actually has to happen.
+  if (account.type === 'littleskin') {
+    throw new Error(
+      'LittleSkin 账户的皮肤由 LittleSkin 官网管理，无法在这里安装。请在启动器主页点击头像或「LittleSkin 角色」进入官网衣柜更换皮肤。',
+    );
+  }
+
+  // Size gate for both remaining account types. The restriction is identical:
+  // Mojang rejects the upload, and the client cannot render the texture grid, so an
+  // offline account stays on Steve. HD skins (128x128 are common in the library)
+  // must therefore never be written anywhere — only 保存到文件夹 is allowed for them.
+  const sizeProblem = skinSizeProblem(buf);
+  if (sizeProblem) {
+    if (account.type === 'microsoft') {
+      // Reported as a result rather than thrown: the UI shows it inline next to the
+      // account, which is where the user is looking.
       return {
         accountId,
         accountName: account.name,
         skinName: skin.name,
         uploaded: false,
-        uploadError: `Minecraft 官方只接受 64×64 或 64×32 的皮肤，这款是 ${size}，已仅应用到启动器预览`,
+        uploadError: sizeProblem,
       };
     }
+    throw new Error(sizeProblem);
+  }
 
+  if (account.type === 'microsoft') {
     try {
       // `model` already uses Mojang's own vocabulary (classic / slim).
       await uploadSkin(accountId, skin.model, pngBase64);
@@ -539,7 +563,7 @@ export async function applySkin(accountId: string, skinId: number): Promise<Slat
     } catch (e) {
       // Keep the preview so the click still does something visible, and surface
       // the reason so the UI can tell the user to re-login.
-      setLocalSkin(accountId, pngBase64);
+      setLocalSkin(accountId, pngBase64, skin.model);
       return {
         accountId,
         accountName: account.name,
@@ -550,17 +574,10 @@ export async function applySkin(accountId: string, skinId: number): Promise<Slat
     }
   }
 
-  // A LittleSkin account's skin is owned by LittleSkin and resolved through its
-  // Yggdrasil texture server, so a local file would neither show in the launcher
-  // (the preview reads the online skin) nor reach the game. Point the user at the
-  // place where the change actually has to happen.
-  if (account.type === 'littleskin') {
-    throw new Error(
-      'LittleSkin 账户的皮肤由 LittleSkin 官网管理，无法在这里安装。请在启动器主页点击头像或「LittleSkin 角色」进入官网衣柜更换皮肤。',
-    );
-  }
-
-  setLocalSkin(accountId, pngBase64);
+  // Offline account: the local file *is* the skin, and the launcher's loopback
+  // Yggdrasil server hands it to the game. The arm width must travel with it —
+  // it is part of the skin's texture metadata, and the website stores it per skin.
+  setLocalSkin(accountId, pngBase64, skin.model);
   return {
     accountId,
     accountName: account.name,

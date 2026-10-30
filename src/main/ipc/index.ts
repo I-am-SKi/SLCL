@@ -8,10 +8,12 @@ import type {
   LaunchConfig,
   LoginProgress,
   ModLoader,
+  ResourceDependency,
   ResourceInstallTarget,
   ResourceSearchOptions,
   ResourceSource,
   ResourceType,
+  SkinVariant,
   VersionFolderKind,
   VersionInstallOptions,
 } from '@shared/types';
@@ -59,7 +61,12 @@ export function registerIpc(): void {
   );
   ipcMain.handle(IPC.accountResetSkin, (_e, accountId: string) => auth.resetSkin(accountId));
   ipcMain.handle(IPC.accountGetSkin, (_e, accountId: string, force?: boolean) => auth.getSkin(accountId, force === true));
-  ipcMain.handle(IPC.accountSetLocalSkin, (_e, accountId: string, pngBase64: string) => auth.setLocalSkin(accountId, pngBase64));
+  ipcMain.handle(
+    IPC.accountSetLocalSkin,
+    (_e, accountId: string, pngBase64: string, variant?: SkinVariant) =>
+      auth.setLocalSkin(accountId, pngBase64, variant),
+  );
+  ipcMain.handle(IPC.accountSkinVariant, (_e, accountId: string) => auth.getSkinVariant(accountId));
   ipcMain.handle(IPC.accountLookupSkin, (_e, username: string) => auth.lookupSkinByUsername(username));
   ipcMain.handle(IPC.accountApplySkin, (_e, accountId: string, username: string) => auth.applySkinFromUsername(accountId, username));
   ipcMain.handle(IPC.accountRememberedLogins, () => auth.listRememberedLogins());
@@ -213,6 +220,25 @@ export function registerIpc(): void {
     resources.listResourceVersions(type, projectId, options),
   );
   ipcMain.handle(
+    IPC.resourcesGameVersions,
+    (_e, projectId: string, source?: ResourceSource) =>
+      resources.supportedGameSupport(projectId, source),
+  );
+  ipcMain.handle(
+    IPC.resourcesDependencies,
+    (
+      _e,
+      type: ResourceType,
+      deps: ResourceDependency[],
+      options: {
+        source: ResourceSource;
+        gameVersions?: string[];
+        loaders?: string[];
+        target: ResourceInstallTarget;
+      },
+    ) => resources.resolveResourceDependencies(type, deps, options),
+  );
+  ipcMain.handle(
     IPC.resourcesInstall,
     (
       _e,
@@ -244,6 +270,20 @@ export function registerIpc(): void {
     resources.getTargetDir(type, target),
   );
   ipcMain.handle(IPC.resourcesMcmodLink, (_e, title: string) => resources.mcmodLink(title));
+  /**
+   * Chinese names for a page of cards.
+   *
+   * Returns only what is already cached (so the call is instant) and queues the
+   * rest in the background; each newly resolved name is pushed back through
+   * `resourcesZhNameResolved`. Blocking here would stall the list for ~20s, since
+   * mcmod allows about one request per second.
+   */
+  ipcMain.handle(IPC.resourcesZhNames, (_e, titles: string[]) => {
+    const known = resources.cachedZhNames(titles);
+    resources.queueZhNames(titles);
+    return known;
+  });
+  resources.onZhNameResolved((payload) => broadcast(IPC.resourcesZhNameResolved, payload));
 
   // ---- misc ----
   ipcMain.handle(IPC.openExternal, (_e, url: string) => shell.openExternal(url));

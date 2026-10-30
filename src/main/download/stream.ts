@@ -55,6 +55,10 @@ export async function downloadWithStall(
   };
 
   let ws: ReturnType<typeof createWriteStream> | null = null;
+  // Declared outside the try so the catch block can report how many bytes arrived
+  // when the connection dies mid-transfer.
+  let received = 0;
+  let expectedTotal = NaN;
   try {
     const res = await fetch(url, { signal: controller.signal, headers: opts.headers });
     clearTimeout(headerTimer);
@@ -63,23 +67,44 @@ export async function downloadWithStall(
     armStall();
     ws = createWriteStream(dest);
     const reader = res.body.getReader();
+    // A server that closes the connection early ends the stream *normally*
+    // (`done: true`), so without this the partial file would look like a
+    // successful download. That is how a 768 KB fragment of a mod ended up in a
+    // player's mods folder and broke the game.
+    const expected = Number(res.headers.get('content-length') ?? '');
+    expectedTotal = expected;
     try {
       for (;;) {
         const { done, value } = await reader.read();
         if (done) break;
         if (!value || value.length === 0) continue;
         armStall();
+        received += value.length;
         opts.onBytes?.(value.length);
         if (!ws.write(Buffer.from(value))) await once(ws, 'drain');
       }
     } finally {
       reader.releaseLock();
     }
+    if (Number.isFinite(expected) && expected > 0 && received !== expected) {
+      throw new Error(`连接提前关闭（已收到 ${received}/${expected} 字节）`);
+    }
     ws.end();
     await once(ws, 'finish');
   } catch (e) {
     if (opts.signal?.aborted) throw new Error(cancelMessage);
     ws?.destroy();
+    // Undici reports an early-closed body as a bare "terminated", which means
+    // nothing to a user and hides that bytes are missing. Rewrite it with the
+    // counts we tracked.
+    const message = e instanceof Error ? e.message : String(e);
+    const isTruncated = /terminated|aborted|ECONNRESET|premature/i.test(message);
+    if (isTruncated) {
+      if (Number.isFinite(expectedTotal) && expectedTotal > 0) {
+        throw new Error(`连接提前关闭（已收到 ${received}/${expectedTotal} 字节）`);
+      }
+      throw new Error('连接提前关闭，文件未下载完整');
+    }
     throw e;
   } finally {
     clearTimeout(headerTimer);

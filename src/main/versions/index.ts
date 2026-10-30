@@ -1375,6 +1375,190 @@ function pickIconPathFromMcmodInfo(text: string): string | null {
   return m ? m[1] : null;
 }
 
+/** Metadata read from one jar: what it declares about itself. */
+export interface ModMeta {
+  /** On-disk file name, including a `.disabled` suffix when present. */
+  file: string;
+  /** Every modId the jar declares (a multi-module jar can have several). */
+  ids: string[];
+  /** Declared version, or empty when the metadata does not carry one. */
+  version: string;
+}
+
+type ModMetaCore = Omit<ModMeta, 'file'>;
+
+/**
+ * Cache keyed by `path|mtime|size`, shared by every consumer of a jar's metadata.
+ *
+ * A jar is immutable once written, so mtime+size is enough to know the entry is
+ * still valid; a replaced file naturally gets a new key.
+ */
+const modMetaCache = new Map<string, ModMetaCore>();
+const MOD_META_CACHE_LIMIT = 4000;
+
+/** Parse Forge/NeoForge `mods.toml`, which can declare several `[[mods]]` blocks. */
+function parseTomlMods(text: string): ModMetaCore {
+  const ids: string[] = [];
+  let version = '';
+  // Each `[[mods]]` block starts a new entry; the values below it belong to it.
+  const blocks = text.split(/^\s*\[\[mods\]\]\s*$/m);
+  for (const blockText of blocks) {
+    const idMatch = /^\s*modId\s*=\s*["']([^"']+)["']/m.exec(blockText);
+    if (!idMatch) continue;
+    ids.push(idMatch[1]);
+    if (!version) {
+      const vMatch = /^\s*version\s*=\s*["']([^"']*)["']/m.exec(blockText);
+      if (vMatch && vMatch[1]) version = vMatch[1];
+    }
+  }
+  // Forge lets authors reference the jar manifest instead of a literal.
+  if (version.startsWith('${')) version = '';
+  return { ids, version };
+}
+
+/** Parse `fabric.mod.json` / `quilt.mod.json`. */
+function parseJsonMods(raw: unknown): ModMetaCore {
+  if (!raw || typeof raw !== 'object') return { ids: [], version: '' };
+  const obj = raw as Record<string, unknown>;
+  const ids: string[] = [];
+  if (typeof obj.id === 'string' && obj.id) ids.push(obj.id);
+  // Quilt nests the same fields under `quilt_loader`.
+  const loader = obj.quilt_loader;
+  if (loader && typeof loader === 'object') {
+    const l = loader as Record<string, unknown>;
+    if (typeof l.id === 'string' && l.id && !ids.includes(l.id)) ids.push(l.id);
+  }
+  const version = typeof obj.version === 'string' ? obj.version : '';
+  return { ids, version };
+}
+
+/** Parse legacy `mcmod.info` (an array of objects, or a single object). */
+function parseMcmodInfo(text: string): ModMetaCore {
+  try {
+    const parsed = JSON.parse(text) as unknown;
+    const first = Array.isArray(parsed) ? parsed[0] : parsed;
+    if (!first || typeof first !== 'object') return { ids: [], version: '' };
+    const obj = first as Record<string, unknown>;
+    const id = typeof obj.modid === 'string' ? obj.modid : '';
+    const version = typeof obj.version === 'string' ? obj.version : '';
+    return { ids: id ? [id] : [], version };
+  } catch {
+    return { ids: [], version: '' };
+  }
+}
+
+/**
+ * Read the modId(s) and version of one jar.
+ *
+ * Returns empty `ids` when the jar carries no recognisable metadata — a few very
+ * old mods predate all four formats, and callers must fall back to filenames.
+ */
+async function readModMeta(jarPath: string): Promise<ModMetaCore> {
+  let zip: Awaited<ReturnType<typeof openZip>> | null = null;
+  const ids: string[] = [];
+  let version = '';
+  try {
+    zip = await openZip(jarPath, { lazyEntries: true, autoClose: false });
+    for await (const entry of walkEntriesGenerator(zip)) {
+      const name = entry.fileName.replace(/\\/g, '/');
+      const isJson = name === 'fabric.mod.json' || name === 'quilt.mod.json';
+      const isToml = name === 'META-INF/mods.toml' || name === 'META-INF/neoforge.mods.toml';
+      const isLegacy = name === 'mcmod.info';
+      if (!isJson && !isToml && !isLegacy) continue;
+
+      try {
+        const text = (await readEntry(zip, entry)).toString('utf8');
+        const parsed = isJson
+          ? parseJsonMods(JSON.parse(text) as unknown)
+          : isToml
+            ? parseTomlMods(text)
+            : parseMcmodInfo(text);
+        for (const id of parsed.ids) if (!ids.includes(id)) ids.push(id);
+        if (!version && parsed.version) version = parsed.version;
+      } catch {
+        /* malformed metadata: keep whatever the other files said */
+      }
+      // Fabric metadata is authoritative; nothing after it adds a modId.
+      if (isJson && ids.length > 0) break;
+    }
+  } catch {
+    /* unreadable jar */
+  } finally {
+    zip?.close();
+  }
+  return { ids, version };
+}
+
+/**
+ * Metadata for every mod jar in a directory.
+ *
+ * Backs "is this dependency already installed?" — matching on modId is the only
+ * reliable test, because the same mod arrives with different file names depending
+ * on the download source, and a jar can be renamed by hand.
+ *
+ * Bounded concurrency keeps a 200-mod pack from exhausting file handles; results
+ * are cached by `path|mtime|size`, so repeat calls are free.
+ */
+export async function scanModsMeta(modsDir: string): Promise<ModMeta[]> {
+  if (!existsSync(modsDir)) return [];
+  const files = readdirSync(modsDir).filter((f) => {
+    const lower = f.toLowerCase();
+    return lower.endsWith('.jar') || lower.endsWith('.jar.disabled');
+  });
+
+  const out: ModMeta[] = [];
+  const tasks = files.map(async (file) => {
+    const full = join(modsDir, file);
+    let cacheKey: string;
+    try {
+      const st = statSync(full);
+      cacheKey = `${full}|${st.mtimeMs}|${st.size}`;
+    } catch {
+      return;
+    }
+    let core = modMetaCache.get(cacheKey);
+    if (!core) {
+      core = await readModMeta(full);
+      if (modMetaCache.size >= MOD_META_CACHE_LIMIT) {
+        const oldest = modMetaCache.keys().next().value;
+        if (oldest !== undefined) modMetaCache.delete(oldest);
+      }
+      modMetaCache.set(cacheKey, core);
+    }
+    out.push({ file, ...core });
+  });
+
+  const LIMIT = 8;
+  for (let i = 0; i < tasks.length; i += LIMIT) {
+    await Promise.all(tasks.slice(i, i + LIMIT));
+  }
+  return out.sort((a, b) => a.file.localeCompare(b.file));
+}
+
+/**
+ * Metadata of a single jar, using the same cache as `scanModsMeta`.
+ *
+ * Used right after a download to learn which modIds the new file declares — that
+ * is what makes duplicate-modId cleanup exact instead of heuristic.
+ */
+export async function readModMetaOf(jarPath: string): Promise<{ ids: string[]; version: string }> {
+  let cacheKey: string;
+  try {
+    const st = statSync(jarPath);
+    cacheKey = `${jarPath}|${st.mtimeMs}|${st.size}`;
+  } catch {
+    return { ids: [], version: '' };
+  }
+  const hit = modMetaCache.get(cacheKey);
+  if (hit) return hit;
+  const fresh = await readModMeta(jarPath);
+  if (modMetaCache.size >= MOD_META_CACHE_LIMIT) {
+    const oldest = modMetaCache.keys().next().value;
+    if (oldest !== undefined) modMetaCache.delete(oldest);
+  }
+  modMetaCache.set(cacheKey, fresh);
+  return fresh;
+}
 /**
  * Resolve every mod's icon for a version.
  * Returns a map of on-disk filename -> PNG data URL (null when the mod ships none).

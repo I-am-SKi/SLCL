@@ -13,6 +13,11 @@ import Select from '../components/Select';
 import VersionIcon, { versionIconKind } from '../components/VersionIcon';
 import { confirmAction } from '../components/ConfirmDialog';
 import { getSlattSession, subscribeSlatt } from '../lib/slatt';
+import {
+  isSupportedSkinSize,
+  pngSizeFromDataUrl,
+  unsupportedSkinSizeMessage,
+} from '../lib/skinSize';
 
 interface HomeProps {
   onNavigate: (view: 'versions' | 'settings') => void;
@@ -397,13 +402,31 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
     }
     const reader = new FileReader();
     reader.onload = () => {
-      setPendingSkin(reader.result as string);
+      const dataUrl = reader.result as string;
+      // Reject unsupported resolutions here rather than at upload time. A 128×128
+      // skin is refused by Mojang *and* cannot be rendered by the client for an
+      // offline account, so accepting it would only produce a skin that never
+      // appears in game.
+      const size = pngSizeFromDataUrl(dataUrl);
+      if (!size) {
+        notify('无法读取该图片的尺寸,请换一个 PNG 文件', 'error');
+        return;
+      }
+      if (!isSupportedSkinSize(size.width, size.height)) {
+        notify(unsupportedSkinSizeMessage(size), 'error');
+        return;
+      }
+      setPendingSkin(dataUrl);
       setPendingSkinName(file.name);
+      // A skin picked here defines the arm width of the *preview*, so start from a
+      // clean default; the user can switch it before applying.
+      setSkinVariant('classic');
     };
     reader.readAsDataURL(file);
     // Allow re-picking the same file after a reset.
     e.target.value = '';
   }
+
 
   /**
    * Detect the account's LittleSkin characters.
@@ -523,12 +546,15 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
           await window.slcl.accounts.uploadSkin(accountId, skinVariant, b64);
           notify('皮肤已上传,进入游戏后生效', 'success');
         } catch (e) {
-          await window.slcl.accounts.setLocalSkin(accountId, b64);
+          await window.slcl.accounts.setLocalSkin(accountId, b64, skinVariant);
           notify(`已保存本地预览(上传游戏失败:${e instanceof Error ? e.message : String(e)})`, 'info');
         }
       } else {
-        await window.slcl.accounts.setLocalSkin(accountId, b64);
-        notify('皮肤已更新(离线账户仅启动器预览)', 'success');
+        // Offline accounts: the local file is the real skin now — the launcher hands
+        // it to the game through a loopback Yggdrasil server at launch, so the arm
+        // width has to be stored with it.
+        await window.slcl.accounts.setLocalSkin(accountId, b64, skinVariant);
+        notify('皮肤已保存,进入游戏后生效', 'success');
       }
       skinCacheRef.current[accountId] = pendingSkin;
       setSkin(pendingSkin);
@@ -718,6 +744,12 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
                 if (selectedAccount?.type === 'littleskin') {
                   void window.slcl.openExternal(LITTLESKIN_CLOSET_URL);
                 } else {
+                  // Pre-select the arm width that is actually stored for this skin,
+                  // instead of always defaulting to classic.
+                  void window.slcl.accounts
+                    .skinVariant(accountId)
+                    .then(setSkinVariant)
+                    .catch(() => setSkinVariant('classic'));
                   setSkinOpen(true);
                 }
               }}
@@ -751,17 +783,18 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
               {selectedAccount ? ACCOUNT_TYPE_LABEL[selectedAccount.type] : '请添加或选择一个账户'}
             </div>
             {slattUser && (
-              // The role is part of the badge: a captain should not read "团队成员".
-              // `roleLabel` comes from the main process and already maps group_id
-              // to 团队成员 / 团队主管 / 团队管理员.
+              // The role is part of the badge: a captain must not read "SLATT团队成员".
+              // `roleLabel` already contains the "SLATT团队…" prefix (the main process
+              // maps group_id to the official group name), so it is used verbatim —
+              // prefixing it again here would render "SLATT SLATT团队主管".
               <div
                 className="slatt-badge"
-                title={`已验证的 SLATT ${slattUser.roleLabel}：${slattUser.username}`}
+                title={`已验证的 ${slattUser.roleLabel}：${slattUser.username}`}
               >
                 <span className="slatt-badge-check" aria-hidden="true">
                   ✓
                 </span>
-                已认证 SLATT {slattUser.roleLabel}
+                已认证 {slattUser.roleLabel}
                 <span className="slatt-badge-sep">·</span>
                 <span className="slatt-badge-name">{slattUser.username}</span>
               </div>
@@ -1197,21 +1230,26 @@ export default function Home({ onNavigate }: HomeProps): JSX.Element {
               </div>
             </div>
 
-            {selectedAccount?.type === 'microsoft' && (
-              <div className="field" style={{ marginBottom: 12 }}>
-                <label className="field-label">皮肤模型</label>
-                <div className="row" style={{ gap: 16 }}>
-                  <label className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                    <input type="radio" name="skinVariant" checked={skinVariant === 'classic'} onChange={() => setSkinVariant('classic')} />
-                    经典(Steve)
-                  </label>
-                  <label className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
-                    <input type="radio" name="skinVariant" checked={skinVariant === 'slim'} onChange={() => setSkinVariant('slim')} />
-                    纤细(Alex)
-                  </label>
-                </div>
+            {/* Arm width applies to every account type: for Microsoft it is sent to
+                Mojang with the upload, for offline accounts it is baked into the
+                texture metadata the launcher serves at launch. Without it a slim
+                skin renders with Steve's 4px arms. */}
+            <div className="field" style={{ marginBottom: 12 }}>
+              <label className="field-label">皮肤模型(手臂粗细)</label>
+              <div className="row" style={{ gap: 16 }}>
+                <label className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="radio" name="skinVariant" checked={skinVariant === 'classic'} onChange={() => setSkinVariant('classic')} />
+                  经典(Steve，4px 手臂)
+                </label>
+                <label className="field-label" style={{ display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer' }}>
+                  <input type="radio" name="skinVariant" checked={skinVariant === 'slim'} onChange={() => setSkinVariant('slim')} />
+                  纤细(Alex，3px 手臂)
+                </label>
               </div>
-            )}
+              <p className="muted small" style={{ margin: '6px 0 0' }}>
+                需与皮肤图一致;选错会导致手臂边缘出现拉伸或透明的像素。
+              </p>
+            </div>
 
             <div className="field" style={{ marginBottom: 12 }}>
               <label className="field-label">从本地文件选择(PNG,64x64 或 64x32)</label>
